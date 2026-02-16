@@ -376,6 +376,22 @@ export default function Index() {
   const [isCapturingAR, setIsCapturingAR] = useState(false);
   const [arCapturedImage, setArCapturedImage] = useState(null);
 
+  // Reference object for accurate measurement
+  const [selectedReferenceObject, setSelectedReferenceObject] = useState(null);
+  const [showReferenceSelector, setShowReferenceSelector] = useState(false);
+  const [detectedReferenceObject, setDetectedReferenceObject] = useState(null);
+
+  // Reference object dimensions (in inches)
+  const referenceObjects = {
+    door: { name: 'Standard Door', width: 36, height: 80, icon: '🚪' },
+    creditCard: { name: 'Credit Card', width: 3.37, height: 2.125, icon: '💳' },
+    dollarBill: { name: 'Dollar Bill', width: 6.14, height: 2.61, icon: '💵' },
+    outlet: { name: 'Electrical Outlet', width: 2.75, height: 4.5, icon: '🔌' },
+    lightSwitch: { name: 'Light Switch', width: 2.75, height: 4.5, icon: '💡' },
+    paper: { name: 'Letter Paper (8.5x11)', width: 8.5, height: 11, icon: '📄' },
+    none: { name: 'No Reference (estimate)', width: 0, height: 0, icon: '❓' },
+  };
+
   // Handle orientation changes using Dimensions (simpler, more reliable)
   // Only active when viewing the marked image modal
   useEffect(() => {
@@ -450,15 +466,40 @@ export default function Index() {
     setIsCapturingAR(false);
   };
 
-  const analyzeWallImage = async (imageUri) => {
+  const analyzeWallImage = async (imageUri, referenceObj = null) => {
   setIsAnalyzing(true);
-  
+
   try {
     const compressedUri = await compressImage(imageUri);
-    
+
     const base64 = await FileSystem.readAsStringAsync(compressedUri, {
       encoding: 'base64',
     });
+
+    // Build reference object instructions
+    let referenceInstructions = '';
+    if (referenceObj && referenceObj !== 'none' && referenceObjects[referenceObj]) {
+      const ref = referenceObjects[referenceObj];
+      referenceInstructions = `
+CRITICAL: The user has placed a ${ref.name} in the image as a reference object.
+The ${ref.name} measures exactly ${ref.width}" wide x ${ref.height}" tall.
+You MUST:
+1. First locate the ${ref.name} in the image
+2. Measure the wall dimensions by comparing pixel sizes to the known reference object size
+3. This will give you ACCURATE measurements - use them!
+
+For example: If the ${ref.name} (${ref.width}" wide) takes up 10% of the image width, and the wall takes up 80% of the image width, then the wall is approximately ${ref.width} * 8 = ${ref.width * 8}" wide.
+`;
+    } else {
+      referenceInstructions = `
+No reference object was specified. Look for these common objects to estimate scale:
+- Standard door: 80" tall, 36" wide
+- Electrical outlet: 2.75" wide, 4.5" tall
+- Light switch: 2.75" wide, 4.5" tall
+- Standard ceiling height: typically 96" (8 feet)
+- Window: typically 36-48" wide
+`;
+    }
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -484,22 +525,16 @@ export default function Index() {
               },
               {
                 type: "text",
-                text: `Analyze this wall for tile installation. Provide dimensions AND identify any obstacles that will require special tile cuts.
+                text: `Analyze this wall for tile installation. Provide ACCURATE dimensions using the reference object, and identify any obstacles.
+${referenceInstructions}
 
-Reference sizes:
-- Standard door: 80" tall, 36" wide
-- Electrical outlet: 3" wide, 5" tall
-- Light switch: 3" wide, 5" tall
-- Window: typically 36-48" wide
-
-Look for these obstacles:
+Also look for these obstacles that will require special tile cuts:
 - Electrical outlets or switches
 - Pipes (water, gas, drain)
 - Windows or window frames
 - Door frames
 - Fixtures (towel bars, toilet paper holders)
 - Vents or registers
-- Corners that aren't 90 degrees
 - Any protrusions or recesses
 
 For each obstacle, estimate:
@@ -512,8 +547,10 @@ Respond ONLY with JSON (no markdown):
 {
   "width": 120,
   "height": 96,
-  "confidence": "medium",
-  "reasoning": "Based on door frame visible in image",
+  "confidence": "high",
+  "referenceObjectFound": true,
+  "referenceObjectUsed": "door",
+  "reasoning": "Measured wall relative to standard door (36x80 inches) visible in image",
   "obstacles": [
     {
       "type": "outlet",
@@ -524,7 +561,7 @@ Respond ONLY with JSON (no markdown):
     },
     {
       "type": "pipe",
-      "location": "bottom-left", 
+      "location": "bottom-left",
       "position": {"x": 12, "y": 6},
       "diameter": 2,
       "cutGuidance": "Will need circular notch in 1 tile"
@@ -552,12 +589,28 @@ Respond ONLY with JSON (no markdown):
     
     setWallWidth(aiResult.width.toString());
     setWallHeight(aiResult.height.toString());
-	
-	// Save obstacles for display
-	if (aiResult.obstacles && aiResult.obstacles.length > 0) {
-		setDetectedObstacles(aiResult.obstacles);
-	}
-    
+
+    // Save detected reference object info
+    if (aiResult.referenceObjectFound) {
+      setDetectedReferenceObject({
+        found: true,
+        type: aiResult.referenceObjectUsed,
+        confidence: aiResult.confidence
+      });
+    }
+
+    // Save obstacles for display
+    if (aiResult.obstacles && aiResult.obstacles.length > 0) {
+      setDetectedObstacles(aiResult.obstacles);
+    }
+
+    // Build reference object info
+    let referenceText = '';
+    if (aiResult.referenceObjectFound && aiResult.referenceObjectUsed) {
+      const refName = referenceObjects[aiResult.referenceObjectUsed]?.name || aiResult.referenceObjectUsed;
+      referenceText = `\n📏 Reference: ${refName}`;
+    }
+
     // Build obstacle summary
     let obstacleText = '';
     if (aiResult.obstacles && aiResult.obstacles.length > 0) {
@@ -567,9 +620,11 @@ Respond ONLY with JSON (no markdown):
       });
       obstacleText += `\n\n⚠️ Estimated ${aiResult.cutTilesEstimate || aiResult.obstacles.length} tiles will need special cuts`;
     }
-    
-    Alert.alert('AI Analysis Complete', 
-      `Wall: ${aiResult.width}" × ${aiResult.height}"\nConfidence: ${aiResult.confidence}\n\n${aiResult.reasoning}${obstacleText}`,
+
+    const confidenceEmoji = aiResult.confidence === 'high' ? '✅' : aiResult.confidence === 'medium' ? '⚠️' : '❓';
+
+    Alert.alert('AI Analysis Complete',
+      `Wall: ${aiResult.width}" × ${aiResult.height}"\n${confidenceEmoji} Confidence: ${aiResult.confidence}${referenceText}\n\n${aiResult.reasoning}${obstacleText}`,
       [{ text: 'OK' }],
       { cancelable: true }
     );
@@ -722,7 +777,7 @@ Respond ONLY with JSON (no markdown):
         console.log('🤖 Starting AI analysis');
         if (cameraMode === 'wall') {
           setCapturedWallImage(photo.uri);
-          await analyzeWallImage(photo.uri);
+          await analyzeWallImage(photo.uri, selectedReferenceObject);
         } else {
           setCapturedTileImage(photo.uri);
           await analyzeTileImage(photo.uri);
@@ -749,10 +804,10 @@ Respond ONLY with JSON (no markdown):
 
     if (!result.canceled) {
       const imageUri = result.assets[0].uri;
-      
+
       if (mode === 'wall') {
         setCapturedWallImage(imageUri);
-        await analyzeWallImage(imageUri);
+        await analyzeWallImage(imageUri, selectedReferenceObject);
       } else {
         setCapturedTileImage(imageUri);
         await analyzeTileImage(imageUri);
@@ -1270,63 +1325,112 @@ if (markedImage && tileWidth && tileHeight) {
       
       {/* Wall Camera Section */}
       <View style={styles.card}>
-	  <Text style={styles.cardTitle}>📸 Wall Detection</Text>
-	  
-	  {capturedWallImage ? (
-		<View style={styles.imageContainer}>
-		  <Image source={{ uri: capturedWallImage }} style={styles.capturedImage} />
-		  {isAnalyzing ? (
-			<View style={styles.analyzingContainer}>
-			  <ActivityIndicator size="large" color="#2563EB" />
-			  <Text style={styles.analyzingText}>AI analyzing wall...</Text>
-			</View>
-		  ) : (
-			<>
-			  <TouchableOpacity 
-				style={styles.retakeButton}
-				onPress={() => setCapturedWallImage(null)}
-			  >
-				<Text style={styles.retakeText}>Use Different Photo</Text>
-			  </TouchableOpacity>
-			  
-			  {detectedObstacles.length > 0 && (
-				<TouchableOpacity 
-				  style={[styles.cameraButton, { marginTop: 12 }]}
-				  onPress={() => {
-					console.log('Markup button clicked!');
-					console.log('Captured image:', capturedWallImage);
-					console.log('Tile width:', tileWidth);
-					console.log('Tile height:', tileHeight);
-					console.log('Obstacles:', detectedObstacles);
-					setMarkedImage(capturedWallImage);
-				  }}
-				>
-				  <Text style={styles.cameraButtonText}>🎨 View Visual Markup</Text>
-				</TouchableOpacity>
-			  )}
-			</>
-		  )}
-		</View>
-	  ) : (
-		<View style={styles.cameraButtons}>
-		  <TouchableOpacity 
-			style={styles.cameraButton}
-			onPress={() => openCamera('wall')}
-		  >
-			<Text style={styles.cameraButtonText}>📷 Open Camera</Text>
-		  </TouchableOpacity>
-		  
-		  <Text style={styles.orText}>or</Text>
-		  
-		  <TouchableOpacity 
-			style={[styles.cameraButton, styles.uploadButton]}
-			onPress={() => pickImage('wall')}
-		  >
-			<Text style={styles.cameraButtonText}>📁 Upload Photo</Text>
-		  </TouchableOpacity>
-		</View>
-	  )}
-	</View>
+        <Text style={styles.cardTitle}>📸 Wall Detection</Text>
+
+        {/* Reference Object Selector */}
+        <View style={{ marginBottom: 16 }}>
+          <Text style={{ fontSize: 14, fontWeight: '600', color: '#374151', marginBottom: 8 }}>
+            📏 Reference Object (for accurate measurement)
+          </Text>
+          <Text style={{ fontSize: 12, color: '#6B7280', marginBottom: 12 }}>
+            Place one of these in your photo for better accuracy:
+          </Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+            {Object.entries(referenceObjects).map(([key, ref]) => (
+              <TouchableOpacity
+                key={key}
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 20,
+                  backgroundColor: selectedReferenceObject === key ? '#2563EB' : '#F3F4F6',
+                  borderWidth: 2,
+                  borderColor: selectedReferenceObject === key ? '#1D4ED8' : '#E5E7EB',
+                }}
+                onPress={() => setSelectedReferenceObject(key)}
+              >
+                <Text style={{
+                  fontSize: 13,
+                  color: selectedReferenceObject === key ? '#fff' : '#374151',
+                  fontWeight: selectedReferenceObject === key ? 'bold' : 'normal',
+                }}>
+                  {ref.icon} {ref.name}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {selectedReferenceObject && selectedReferenceObject !== 'none' && (
+            <View style={{ marginTop: 12, backgroundColor: '#DBEAFE', padding: 12, borderRadius: 8 }}>
+              <Text style={{ fontSize: 13, color: '#1E40AF' }}>
+                ✅ Place a {referenceObjects[selectedReferenceObject].name} in your wall photo.
+                {'\n'}Known size: {referenceObjects[selectedReferenceObject].width}" × {referenceObjects[selectedReferenceObject].height}"
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {capturedWallImage ? (
+          <View style={styles.imageContainer}>
+            <Image source={{ uri: capturedWallImage }} style={styles.capturedImage} />
+            {isAnalyzing ? (
+              <View style={styles.analyzingContainer}>
+                <ActivityIndicator size="large" color="#2563EB" />
+                <Text style={styles.analyzingText}>AI analyzing wall{selectedReferenceObject ? ` with ${referenceObjects[selectedReferenceObject]?.name}` : ''}...</Text>
+              </View>
+            ) : (
+              <>
+                {/* Show detected reference info */}
+                {detectedReferenceObject?.found && (
+                  <View style={{ backgroundColor: '#D1FAE5', padding: 12, borderRadius: 8, marginBottom: 8 }}>
+                    <Text style={{ fontSize: 13, color: '#065F46' }}>
+                      ✅ Reference object detected - measurements are more accurate!
+                    </Text>
+                  </View>
+                )}
+                <TouchableOpacity
+                  style={styles.retakeButton}
+                  onPress={() => {
+                    setCapturedWallImage(null);
+                    setDetectedReferenceObject(null);
+                  }}
+                >
+                  <Text style={styles.retakeText}>Use Different Photo</Text>
+                </TouchableOpacity>
+
+                {detectedObstacles.length > 0 && (
+                  <TouchableOpacity
+                    style={[styles.cameraButton, { marginTop: 12 }]}
+                    onPress={() => {
+                      console.log('Markup button clicked!');
+                      setMarkedImage(capturedWallImage);
+                    }}
+                  >
+                    <Text style={styles.cameraButtonText}>🎨 View Visual Markup</Text>
+                  </TouchableOpacity>
+                )}
+              </>
+            )}
+          </View>
+        ) : (
+          <View style={styles.cameraButtons}>
+            <TouchableOpacity
+              style={styles.cameraButton}
+              onPress={() => openCamera('wall')}
+            >
+              <Text style={styles.cameraButtonText}>📷 Open Camera</Text>
+            </TouchableOpacity>
+
+            <Text style={styles.orText}>or</Text>
+
+            <TouchableOpacity
+              style={[styles.cameraButton, styles.uploadButton]}
+              onPress={() => pickImage('wall')}
+            >
+              <Text style={styles.cameraButtonText}>📁 Upload Photo</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
 
       {/* Wall Dimensions */}
       <View style={styles.card}>
