@@ -1248,8 +1248,10 @@ if (markedImage && tileWidth && tileHeight) {
 }
 
   console.log('🎨 Rendering main UI');
+
   // Use a key to force ScrollView re-creation when capturedWallImage changes
   const scrollKey = `main-scroll-${capturedWallImage ? 'with-image' : 'no-image'}`;
+
   return (
     <View style={{ flex: 1, backgroundColor: '#FEF3E2' }}>
     <ScrollView key={scrollKey} style={{ flex: 1 }}>

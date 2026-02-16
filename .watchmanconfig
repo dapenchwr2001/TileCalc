@@ -1,0 +1,4 @@
+{
+  "ignore_dirs": [".git", ".expo", "android/build", "android/app/build"],
+  "ignore_files": ["expo-env.d.ts"]
+}
