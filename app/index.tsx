@@ -6,9 +6,240 @@ import * as FileSystem from 'expo-file-system/legacy';
 const EncodingType = FileSystem.EncodingType || { Base64: 'base64' };
 import { ANTHROPIC_API_KEY } from '../config';
 import * as ImageManipulator from 'expo-image-manipulator';
-import { Svg, Rect, Text as SvgText, Circle, Line } from 'react-native-svg';
+import { Svg, Rect, Text as SvgText, Circle, Line, Polygon } from 'react-native-svg';
 import ViewShot from 'react-native-view-shot';
 import * as MediaLibrary from 'expo-media-library';
+
+// Bilinear interpolation for perspective transformation
+// Maps normalized (u,v) coordinates within the quadrilateral defined by corners
+const bilinearInterpolate = (u: number, v: number, corners: {
+  tl: { x: number; y: number };
+  tr: { x: number; y: number };
+  bl: { x: number; y: number };
+  br: { x: number; y: number };
+}) => {
+  // Interpolate along top edge (tl to tr)
+  const topX = corners.tl.x + (corners.tr.x - corners.tl.x) * u;
+  const topY = corners.tl.y + (corners.tr.y - corners.tl.y) * u;
+
+  // Interpolate along bottom edge (bl to br)
+  const bottomX = corners.bl.x + (corners.br.x - corners.bl.x) * u;
+  const bottomY = corners.bl.y + (corners.br.y - corners.bl.y) * u;
+
+  // Interpolate between top and bottom
+  return {
+    x: topX + (bottomX - topX) * v,
+    y: topY + (bottomY - topY) * v
+  };
+};
+
+// DraggableCorner component with stable PanResponder using relative movement
+const DraggableCorner = ({
+  cornerKey,
+  corner,
+  setCorners,
+  offsetX,
+  offsetY,
+  displayedWidth,
+  displayedHeight,
+  label
+}: {
+  cornerKey: string;
+  corner: { x: number; y: number };
+  setCorners: React.Dispatch<React.SetStateAction<any>>;
+  offsetX: number;
+  offsetY: number;
+  displayedWidth: number;
+  displayedHeight: number;
+  label: string;
+}) => {
+  const cornerSize = 32;
+  const hitAreaSize = 56;
+
+  // Track starting position when drag begins
+  const startCornerRef = React.useRef({ x: 0, y: 0 });
+
+  // Track current layout dimensions (updated via ref to avoid recreating PanResponder)
+  const layoutRef = React.useRef({ displayedWidth, displayedHeight });
+  layoutRef.current = { displayedWidth, displayedHeight };
+
+  // Create stable PanResponder that doesn't change on re-renders
+  const panResponder = React.useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => {
+        // Capture starting position when drag begins
+        setCorners((prev: any) => {
+          startCornerRef.current = { ...prev[cornerKey] };
+          return prev;
+        });
+      },
+      onPanResponderMove: (_, gestureState) => {
+        // Use relative movement (dx/dy) instead of absolute position
+        const { displayedWidth: dw, displayedHeight: dh } = layoutRef.current;
+
+        // Convert pixel movement to normalized coordinates
+        const deltaX = gestureState.dx / dw;
+        const deltaY = gestureState.dy / dh;
+
+        // Calculate new position from starting position + delta
+        const newX = Math.max(0, Math.min(1, startCornerRef.current.x + deltaX));
+        const newY = Math.max(0, Math.min(1, startCornerRef.current.y + deltaY));
+
+        setCorners((prev: any) => ({
+          ...prev,
+          [cornerKey]: { x: newX, y: newY }
+        }));
+      },
+      onPanResponderRelease: () => {
+        // Nothing needed on release
+      }
+    })
+  ).current;
+
+  // Calculate screen position from normalized corner position
+  const screenX = offsetX + corner.x * displayedWidth;
+  const screenY = offsetY + corner.y * displayedHeight;
+
+  return (
+    <View
+      {...panResponder.panHandlers}
+      style={{
+        position: 'absolute',
+        left: screenX - hitAreaSize / 2,
+        top: screenY - hitAreaSize / 2,
+        width: hitAreaSize,
+        height: hitAreaSize,
+        justifyContent: 'center',
+        alignItems: 'center',
+        zIndex: 100,
+      }}
+    >
+      {/* Visible corner handle */}
+      <View
+        style={{
+          width: cornerSize,
+          height: cornerSize,
+          borderRadius: cornerSize / 2,
+          backgroundColor: '#2563EB',
+          borderWidth: 3,
+          borderColor: '#fff',
+          justifyContent: 'center',
+          alignItems: 'center',
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: 2 },
+          shadowOpacity: 0.3,
+          shadowRadius: 4,
+          elevation: 5,
+        }}
+      >
+        <Text style={{ color: '#fff', fontSize: 10, fontWeight: 'bold' }}>{label}</Text>
+      </View>
+    </View>
+  );
+};
+
+// CornerSelector component - container for 4 draggable corners
+const CornerSelector = ({
+  corners,
+  setCorners,
+  offsetX,
+  offsetY,
+  displayedWidth,
+  displayedHeight,
+}: {
+  corners: {
+    tl: { x: number; y: number };
+    tr: { x: number; y: number };
+    bl: { x: number; y: number };
+    br: { x: number; y: number };
+  };
+  setCorners: React.Dispatch<React.SetStateAction<any>>;
+  offsetX: number;
+  offsetY: number;
+  displayedWidth: number;
+  displayedHeight: number;
+}) => {
+  // Convert normalized corners to screen coordinates
+  const getScreenPos = (corner: { x: number; y: number }) => ({
+    x: offsetX + corner.x * displayedWidth,
+    y: offsetY + corner.y * displayedHeight
+  });
+
+  const tlScreen = getScreenPos(corners.tl);
+  const trScreen = getScreenPos(corners.tr);
+  const blScreen = getScreenPos(corners.bl);
+  const brScreen = getScreenPos(corners.br);
+
+  return (
+    <>
+      {/* Lines connecting corners */}
+      <Svg
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: offsetX + displayedWidth + 50,
+          height: offsetY + displayedHeight + 50,
+        }}
+        pointerEvents="none"
+      >
+        {/* Top edge */}
+        <Line x1={tlScreen.x} y1={tlScreen.y} x2={trScreen.x} y2={trScreen.y} stroke="#2563EB" strokeWidth={3} strokeDasharray="8,4" />
+        {/* Bottom edge */}
+        <Line x1={blScreen.x} y1={blScreen.y} x2={brScreen.x} y2={brScreen.y} stroke="#2563EB" strokeWidth={3} strokeDasharray="8,4" />
+        {/* Left edge */}
+        <Line x1={tlScreen.x} y1={tlScreen.y} x2={blScreen.x} y2={blScreen.y} stroke="#2563EB" strokeWidth={3} strokeDasharray="8,4" />
+        {/* Right edge */}
+        <Line x1={trScreen.x} y1={trScreen.y} x2={brScreen.x} y2={brScreen.y} stroke="#2563EB" strokeWidth={3} strokeDasharray="8,4" />
+      </Svg>
+
+      {/* Draggable corners */}
+      <DraggableCorner
+        cornerKey="tl"
+        corner={corners.tl}
+        setCorners={setCorners}
+        offsetX={offsetX}
+        offsetY={offsetY}
+        displayedWidth={displayedWidth}
+        displayedHeight={displayedHeight}
+        label="TL"
+      />
+      <DraggableCorner
+        cornerKey="tr"
+        corner={corners.tr}
+        setCorners={setCorners}
+        offsetX={offsetX}
+        offsetY={offsetY}
+        displayedWidth={displayedWidth}
+        displayedHeight={displayedHeight}
+        label="TR"
+      />
+      <DraggableCorner
+        cornerKey="bl"
+        corner={corners.bl}
+        setCorners={setCorners}
+        offsetX={offsetX}
+        offsetY={offsetY}
+        displayedWidth={displayedWidth}
+        displayedHeight={displayedHeight}
+        label="BL"
+      />
+      <DraggableCorner
+        cornerKey="br"
+        corner={corners.br}
+        setCorners={setCorners}
+        offsetX={offsetX}
+        offsetY={offsetY}
+        displayedWidth={displayedWidth}
+        displayedHeight={displayedHeight}
+        label="BR"
+      />
+    </>
+  );
+};
+
 const compressImage = async (uri: string) => {
   const manipResult = await ImageManipulator.manipulateAsync(
     uri,
@@ -88,7 +319,36 @@ const calculateTileGrid = (wallW, wallH, tileW, tileH, grout, obstacles) => {
   return { grid, tilesWide, tilesHigh };
 };
 
-const MarkedWallImage = ({ imageUri, wallWidth, wallHeight, obstacles, tileWidth, tileHeight, groutSpacing, isLandscape }) => {
+const MarkedWallImage = ({
+  imageUri,
+  wallWidth,
+  wallHeight,
+  obstacles,
+  tileWidth,
+  tileHeight,
+  groutSpacing,
+  isLandscape,
+  selectedCorners,
+  setSelectedCorners,
+  showCornerSelector
+}: {
+  imageUri: string;
+  wallWidth: string;
+  wallHeight: string;
+  obstacles: any[];
+  tileWidth: string;
+  tileHeight: string;
+  groutSpacing: string;
+  isLandscape: boolean;
+  selectedCorners?: {
+    tl: { x: number; y: number };
+    tr: { x: number; y: number };
+    bl: { x: number; y: number };
+    br: { x: number; y: number };
+  };
+  setSelectedCorners?: React.Dispatch<React.SetStateAction<any>>;
+  showCornerSelector?: boolean;
+}) => {
   const [containerSize, setContainerSize] = React.useState({ width: 0, height: 0 });
   const [actualImageDimensions, setActualImageDimensions] = React.useState({ width: 0, height: 0 });
   const [imageError, setImageError] = React.useState(false);
@@ -226,8 +486,22 @@ const MarkedWallImage = ({ imageUri, wallWidth, wallHeight, obstacles, tileWidth
   // Guard against division by zero
   const wallW = parseFloat(wallWidth) || 1;
   const wallH = parseFloat(wallHeight) || 1;
-  const scaleX = displayedImage.width / wallW;
-  const scaleY = displayedImage.height / wallH;
+
+  // IMPORTANT: Use uniform scaling to maintain tile aspect ratio (squares stay squares)
+  // Calculate scale based on the smaller dimension to fit within the image
+  const scaleByWidth = displayedImage.width / wallW;
+  const scaleByHeight = displayedImage.height / wallH;
+  const uniformScale = Math.min(scaleByWidth, scaleByHeight);
+
+  // Use uniform scale for both X and Y so tiles maintain their proportions
+  const scaleX = uniformScale;
+  const scaleY = uniformScale;
+
+  // Calculate offset to center the grid within the image
+  const gridWidth = wallW * uniformScale;
+  const gridHeight = wallH * uniformScale;
+  const gridOffsetX = (displayedImage.width - gridWidth) / 2;
+  const gridOffsetY = (displayedImage.height - gridHeight) / 2;
 
   // Calculate tile grid
   const { grid, tilesWide, tilesHigh } = calculateTileGrid(
@@ -259,13 +533,83 @@ const MarkedWallImage = ({ imageUri, wallWidth, wallHeight, obstacles, tileWidth
         >
           {/* Draw tile grid */}
           {grid.map((tile) => {
-            // Convert from wall inches to displayed image pixels
-            // Note: SVG Y=0 is at top, but wall Y=0 is at bottom, so we invert Y
-            const x = displayedImage.offsetX + tile.x * scaleX;
-            const y = displayedImage.offsetY + (wallH - tile.y - tile.height) * scaleY;
+            // Check if user has customized corners (not default full-image corners)
+            const hasCustomCorners = selectedCorners && (
+              selectedCorners.tl.x !== 0 || selectedCorners.tl.y !== 0 ||
+              selectedCorners.tr.x !== 1 || selectedCorners.tr.y !== 0 ||
+              selectedCorners.bl.x !== 0 || selectedCorners.bl.y !== 1 ||
+              selectedCorners.br.x !== 1 || selectedCorners.br.y !== 1
+            );
+
+            if (hasCustomCorners && selectedCorners) {
+              // Use perspective transformation with bilinear interpolation
+              // Convert tile position to normalized coordinates (0-1) relative to wall
+              const u1 = tile.x / wallW;
+              const v1 = 1 - (tile.y + tile.height) / wallH; // Flip Y for SVG
+              const u2 = (tile.x + tile.width) / wallW;
+              const v2 = 1 - tile.y / wallH; // Flip Y for SVG
+
+              // Convert normalized corners to screen coordinates
+              const cornersInPixels = {
+                tl: {
+                  x: displayedImage.offsetX + selectedCorners.tl.x * displayedImage.width,
+                  y: displayedImage.offsetY + selectedCorners.tl.y * displayedImage.height
+                },
+                tr: {
+                  x: displayedImage.offsetX + selectedCorners.tr.x * displayedImage.width,
+                  y: displayedImage.offsetY + selectedCorners.tr.y * displayedImage.height
+                },
+                bl: {
+                  x: displayedImage.offsetX + selectedCorners.bl.x * displayedImage.width,
+                  y: displayedImage.offsetY + selectedCorners.bl.y * displayedImage.height
+                },
+                br: {
+                  x: displayedImage.offsetX + selectedCorners.br.x * displayedImage.width,
+                  y: displayedImage.offsetY + selectedCorners.br.y * displayedImage.height
+                }
+              };
+
+              // Calculate the 4 corners of this tile using bilinear interpolation
+              const p1 = bilinearInterpolate(u1, v1, cornersInPixels); // top-left
+              const p2 = bilinearInterpolate(u2, v1, cornersInPixels); // top-right
+              const p3 = bilinearInterpolate(u2, v2, cornersInPixels); // bottom-right
+              const p4 = bilinearInterpolate(u1, v2, cornersInPixels); // bottom-left
+
+              const points = `${p1.x},${p1.y} ${p2.x},${p2.y} ${p3.x},${p3.y} ${p4.x},${p4.y}`;
+
+              // Calculate center for tile number
+              const centerX = (p1.x + p2.x + p3.x + p4.x) / 4;
+              const centerY = (p1.y + p2.y + p3.y + p4.y) / 4;
+
+              return (
+                <React.Fragment key={tile.number}>
+                  <Polygon
+                    points={points}
+                    stroke={tile.needsCut ? "#EF4444" : "#10B981"}
+                    strokeWidth={2}
+                    fill={tile.needsCut ? "rgba(239, 68, 68, 0.1)" : "rgba(16, 185, 129, 0.05)"}
+                  />
+                  <SvgText
+                    x={centerX}
+                    y={centerY}
+                    fill={tile.needsCut ? "#DC2626" : "#059669"}
+                    fontSize="10"
+                    fontWeight="bold"
+                    textAnchor="middle"
+                  >
+                    {tile.number}
+                  </SvgText>
+                </React.Fragment>
+              );
+            }
+
+            // Default: no perspective transformation
+            // Use grid offset to center the properly-proportioned grid
+            const x = displayedImage.offsetX + gridOffsetX + tile.x * scaleX;
+            const y = displayedImage.offsetY + gridOffsetY + (wallH - tile.y - tile.height) * scaleY;
             const w = tile.width * scaleX;
             const h = tile.height * scaleY;
-            
+
             return (
               <React.Fragment key={tile.number}>
                 <Rect
@@ -277,7 +621,7 @@ const MarkedWallImage = ({ imageUri, wallWidth, wallHeight, obstacles, tileWidth
                   strokeWidth={2}
                   fill={tile.needsCut ? "rgba(239, 68, 68, 0.1)" : "rgba(16, 185, 129, 0.05)"}
                 />
-                
+
                 {/* Tile number */}
                 <SvgText
                   x={x + w / 2}
@@ -296,8 +640,9 @@ const MarkedWallImage = ({ imageUri, wallWidth, wallHeight, obstacles, tileWidth
           {/* Mark obstacles */}
           {obstacles?.map((obstacle, index) => {
             // Convert from wall inches (Y=0 at bottom) to SVG pixels (Y=0 at top)
-            const obsX = displayedImage.offsetX + (obstacle.position?.x || 0) * scaleX;
-            const obsY = displayedImage.offsetY + (wallH - (obstacle.position?.y || 0)) * scaleY;
+            // Use grid offset to match the tile grid position
+            const obsX = displayedImage.offsetX + gridOffsetX + (obstacle.position?.x || 0) * scaleX;
+            const obsY = displayedImage.offsetY + gridOffsetY + (wallH - (obstacle.position?.y || 0)) * scaleY;
             const size = obstacle.diameter || obstacle.size?.width || 5;
             const radius = (size / 2) * scaleX;
 
@@ -340,6 +685,18 @@ const MarkedWallImage = ({ imageUri, wallWidth, wallHeight, obstacles, tileWidth
           })}
         </Svg>
       )}
+
+      {/* Corner selector overlay for adjusting tile area */}
+      {showCornerSelector && selectedCorners && setSelectedCorners && displayedImage.width > 0 && (
+        <CornerSelector
+          corners={selectedCorners}
+          setCorners={setSelectedCorners}
+          offsetX={displayedImage.offsetX}
+          offsetY={displayedImage.offsetY}
+          displayedWidth={displayedImage.width}
+          displayedHeight={displayedImage.height}
+        />
+      )}
     </View>
   );
 };
@@ -380,6 +737,35 @@ export default function Index() {
   const [selectedReferenceObject, setSelectedReferenceObject] = useState(null);
   const [showReferenceSelector, setShowReferenceSelector] = useState(false);
   const [detectedReferenceObject, setDetectedReferenceObject] = useState(null);
+
+  // Corner selection state for perspective-corrected tile area
+  const [selectedCorners, setSelectedCorners] = useState({
+    tl: { x: 0, y: 0 },
+    tr: { x: 1, y: 0 },
+    bl: { x: 0, y: 1 },
+    br: { x: 1, y: 1 }
+  });
+  const [showCornerSelector, setShowCornerSelector] = useState(false);
+
+  // Area selection state - shown after taking photo, before AI analysis
+  const [showAreaSelector, setShowAreaSelector] = useState(false);
+  const [pendingImageUri, setPendingImageUri] = useState<string | null>(null);
+  const [areaCorners, setAreaCorners] = useState({
+    tl: { x: 0.05, y: 0.05 },
+    tr: { x: 0.95, y: 0.05 },
+    bl: { x: 0.05, y: 0.95 },
+    br: { x: 0.95, y: 0.95 }
+  });
+
+  // Onboarding/Instructions screen state - show on first launch of each session
+  const [showInstructions, setShowInstructions] = useState(true);
+  const [isFirstLaunch, setIsFirstLaunch] = useState(true);
+
+  // Dismiss instructions
+  const dismissInstructions = () => {
+    setShowInstructions(false);
+    setIsFirstLaunch(false);
+  };
 
   // Reference object dimensions (in inches)
   const referenceObjects = {
@@ -466,7 +852,7 @@ export default function Index() {
     setIsCapturingAR(false);
   };
 
-  const analyzeWallImage = async (imageUri, referenceObj = null) => {
+  const analyzeWallImage = async (imageUri, referenceObj = null, areaSelection = null) => {
   setIsAnalyzing(true);
 
   try {
@@ -476,29 +862,43 @@ export default function Index() {
       encoding: 'base64',
     });
 
+    // Build area selection instructions
+    let areaInstructions = '';
+    if (areaSelection) {
+      const tlX = Math.round(areaSelection.tl.x * 100);
+      const tlY = Math.round(areaSelection.tl.y * 100);
+      const trX = Math.round(areaSelection.tr.x * 100);
+      const trY = Math.round(areaSelection.tr.y * 100);
+      const blX = Math.round(areaSelection.bl.x * 100);
+      const blY = Math.round(areaSelection.bl.y * 100);
+      const brX = Math.round(areaSelection.br.x * 100);
+      const brY = Math.round(areaSelection.br.y * 100);
+
+      areaInstructions = `
+IMPORTANT: The user has selected a SPECIFIC AREA of the image to tile.
+The selected area corners (as percentage of image dimensions):
+- Top-Left: ${tlX}% from left, ${tlY}% from top
+- Top-Right: ${trX}% from left, ${trY}% from top
+- Bottom-Left: ${blX}% from left, ${blY}% from top
+- Bottom-Right: ${brX}% from left, ${brY}% from top
+
+ONLY measure and analyze THIS selected area, not the entire image!
+The wall dimensions you return should be for this selected region only.
+`;
+    }
+
     // Build reference object instructions
     let referenceInstructions = '';
     if (referenceObj && referenceObj !== 'none' && referenceObjects[referenceObj]) {
       const ref = referenceObjects[referenceObj];
-      referenceInstructions = `
-CRITICAL: The user has placed a ${ref.name} in the image as a reference object.
-The ${ref.name} measures exactly ${ref.width}" wide x ${ref.height}" tall.
-You MUST:
-1. First locate the ${ref.name} in the image
-2. Measure the wall dimensions by comparing pixel sizes to the known reference object size
-3. This will give you ACCURATE measurements - use them!
-
-For example: If the ${ref.name} (${ref.width}" wide) takes up 10% of the image width, and the wall takes up 80% of the image width, then the wall is approximately ${ref.width} * 8 = ${ref.width * 8}" wide.
-`;
+      referenceInstructions = 'CRITICAL: The user placed a ' + ref.name + ' in the image. ';
+      referenceInstructions += 'It measures exactly ' + ref.width + ' inches wide x ' + ref.height + ' inches tall. ';
+      referenceInstructions += 'You MUST locate it and use it to calculate the wall size. ';
+      referenceInstructions += 'Compare the reference object size to the wall area in the photo. ';
+      referenceInstructions += 'If this is a zoomed-in photo of a small area, give SMALL dimensions. ';
+      referenceInstructions += 'Do NOT guess typical wall sizes - only measure what you see.';
     } else {
-      referenceInstructions = `
-No reference object was specified. Look for these common objects to estimate scale:
-- Standard door: 80" tall, 36" wide
-- Electrical outlet: 2.75" wide, 4.5" tall
-- Light switch: 2.75" wide, 4.5" tall
-- Standard ceiling height: typically 96" (8 feet)
-- Window: typically 36-48" wide
-`;
+      referenceInstructions = 'No reference object specified. Look for doors (80x36 inches), outlets (4.5x2.75 inches), or light switches to estimate scale. Only measure what you see.';
     }
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -526,7 +926,7 @@ No reference object was specified. Look for these common objects to estimate sca
               {
                 type: "text",
                 text: `Analyze this wall for tile installation. Provide ACCURATE dimensions using the reference object, and identify any obstacles.
-${referenceInstructions}
+${areaInstructions}${referenceInstructions}
 
 Also look for these obstacles that will require special tile cuts:
 - Electrical outlets or switches
@@ -578,15 +978,29 @@ Respond ONLY with JSON (no markdown):
     });
 
     const data = await response.json();
-    
+
     if (data.error) {
       throw new Error(data.error.message);
     }
 
     const text = data.content.find(item => item.type === "text")?.text || "";
-    const cleanText = text.replace(/```json|```/g, "").trim();
+    console.log('🤖 AI Raw Response:', text.substring(0, 300));
+
+    // Clean up the response - remove markdown and find JSON
+    let cleanText = text.replace(/```json|```/g, "").trim();
+
+    // Try to extract JSON if the response has extra text before/after
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      cleanText = jsonMatch[0];
+    } else {
+      console.error('❌ No JSON found in response');
+      throw new Error('AI response did not contain valid JSON');
+    }
+
+    console.log('🔍 Extracted JSON:', cleanText.substring(0, 200));
     const aiResult = JSON.parse(cleanText);
-    
+
     setWallWidth(aiResult.width.toString());
     setWallHeight(aiResult.height.toString());
 
@@ -774,15 +1188,19 @@ Respond ONLY with JSON (no markdown):
         setIsLandscape(false); // Reset landscape state
         setShowCamera(false);
 
-        console.log('🤖 Starting AI analysis');
         if (cameraMode === 'wall') {
+          // For wall photos, analyze directly
+          console.log('🤖 Starting AI analysis...');
           setCapturedWallImage(photo.uri);
           await analyzeWallImage(photo.uri, selectedReferenceObject);
+          console.log('✅ Analysis complete');
         } else {
+          // For tile photos, analyze immediately
+          console.log('🤖 Starting AI analysis');
           setCapturedTileImage(photo.uri);
           await analyzeTileImage(photo.uri);
+          console.log('✅ Analysis complete');
         }
-        console.log('✅ Analysis complete');
       } catch (error) {
         console.error('❌ Error taking picture:', error);
         setShowAROverlay(false);
@@ -798,7 +1216,7 @@ Respond ONLY with JSON (no markdown):
   const pickImage = async (mode) => {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
+      allowsEditing: false, // Don't use built-in editor, we have our own area selector
       quality: 1,
     });
 
@@ -806,8 +1224,11 @@ Respond ONLY with JSON (no markdown):
       const imageUri = result.assets[0].uri;
 
       if (mode === 'wall') {
+        // For wall photos, analyze directly
+        console.log('🤖 Starting AI analysis...');
         setCapturedWallImage(imageUri);
         await analyzeWallImage(imageUri, selectedReferenceObject);
+        console.log('✅ Analysis complete');
       } else {
         setCapturedTileImage(imageUri);
         await analyzeTileImage(imageUri);
@@ -937,12 +1358,123 @@ Respond ONLY with JSON (no markdown):
   // Debug: Log render state
   console.log('🔄 Render state:', {
     showCamera,
+    showAreaSelector,
     markedImage: !!markedImage,
     capturedWallImage: !!capturedWallImage,
     isLandscape,
     tileWidth,
     tileHeight
   });
+
+  // Function to proceed with AI analysis after area selection
+  const proceedWithAnalysis = async () => {
+    if (!pendingImageUri) return;
+
+    console.log('🤖 Starting AI analysis with selected area...');
+    setShowAreaSelector(false);
+
+    // Pass the area corners to the AI analysis so it knows what area to focus on
+    await analyzeWallImage(pendingImageUri, selectedReferenceObject, areaCorners);
+
+    // Also set these corners for the visual markup view
+    setSelectedCorners(areaCorners);
+
+    setPendingImageUri(null);
+    console.log('✅ Analysis complete');
+  };
+
+  // Cancel area selection and go back
+  const cancelAreaSelection = () => {
+    setShowAreaSelector(false);
+    setPendingImageUri(null);
+    setCapturedWallImage(null);
+  };
+
+  // Area Selector Screen - shown after taking/picking a wall photo
+  // Simplified version without draggable corners to avoid crashes
+  if (showAreaSelector && pendingImageUri) {
+    console.log('📐 Rendering Area Selector');
+    return (
+      <View style={{ flex: 1, backgroundColor: '#000' }}>
+        {/* Header */}
+        <View style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          paddingHorizontal: 16,
+          paddingTop: 50,
+          paddingBottom: 16,
+          backgroundColor: 'rgba(0,0,0,0.8)'
+        }}>
+          <TouchableOpacity onPress={cancelAreaSelection}>
+            <Text style={{ color: '#fff', fontSize: 16 }}>✕ Cancel</Text>
+          </TouchableOpacity>
+          <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>
+            Confirm Photo
+          </Text>
+          <View style={{ width: 60 }} />
+        </View>
+
+        {/* Instructions */}
+        <View style={{
+          backgroundColor: 'rgba(59, 130, 246, 0.9)',
+          paddingVertical: 12,
+          paddingHorizontal: 16
+        }}>
+          <Text style={{ color: '#fff', fontSize: 14, textAlign: 'center' }}>
+            📸 Review your photo, then tap "Analyze" to measure the wall
+          </Text>
+        </View>
+
+        {/* Image preview */}
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 16 }}>
+          <Image
+            source={{ uri: pendingImageUri }}
+            style={{ width: '100%', height: '100%', borderRadius: 8 }}
+            resizeMode="contain"
+          />
+        </View>
+
+        {/* Bottom buttons */}
+        <View style={{
+          padding: 16,
+          paddingBottom: 32,
+          backgroundColor: 'rgba(0,0,0,0.8)'
+        }}>
+          <TouchableOpacity
+            onPress={proceedWithAnalysis}
+            style={{
+              backgroundColor: '#10B981',
+              paddingVertical: 16,
+              borderRadius: 12,
+              alignItems: 'center',
+              marginBottom: 12
+            }}
+          >
+            <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>
+              ✓ Analyze This Photo
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={cancelAreaSelection}
+            style={{
+              backgroundColor: 'transparent',
+              paddingVertical: 12,
+              borderRadius: 12,
+              alignItems: 'center',
+              borderWidth: 1,
+              borderColor: '#6B7280'
+            }}
+          >
+            <Text style={{ color: '#9CA3AF', fontSize: 16 }}>
+              ↩ Retake Photo
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
 
   // Camera View
   if (showCamera) {
@@ -1210,6 +1742,53 @@ if (markedImage && tileWidth && tileHeight) {
           <Text style={{ color: '#fff', fontSize: 20, fontWeight: 'bold' }}>✕</Text>
         </TouchableOpacity>
 
+        {/* Corner adjustment toggle button */}
+        <TouchableOpacity
+          onPress={() => setShowCornerSelector(!showCornerSelector)}
+          style={{
+            position: 'absolute',
+            top: 10,
+            right: 60,
+            zIndex: 10,
+            padding: 8,
+            backgroundColor: showCornerSelector ? '#3B82F6' : 'rgba(0,0,0,0.6)',
+            borderRadius: 20,
+            width: 36,
+            height: 36,
+            justifyContent: 'center',
+            alignItems: 'center'
+          }}
+        >
+          <Text style={{ color: '#fff', fontSize: 16 }}>⛶</Text>
+        </TouchableOpacity>
+
+        {/* Reset corners button */}
+        {showCornerSelector && (
+          <TouchableOpacity
+            onPress={() => setSelectedCorners({
+              tl: { x: 0, y: 0 },
+              tr: { x: 1, y: 0 },
+              bl: { x: 0, y: 1 },
+              br: { x: 1, y: 1 }
+            })}
+            style={{
+              position: 'absolute',
+              top: 10,
+              right: 110,
+              zIndex: 10,
+              padding: 8,
+              backgroundColor: 'rgba(0,0,0,0.6)',
+              borderRadius: 20,
+              width: 36,
+              height: 36,
+              justifyContent: 'center',
+              alignItems: 'center'
+            }}
+          >
+            <Text style={{ color: '#fff', fontSize: 16 }}>↺</Text>
+          </TouchableOpacity>
+        )}
+
         {/* Full-screen image with grid */}
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 8 }}>
           <MarkedWallImage
@@ -1221,6 +1800,9 @@ if (markedImage && tileWidth && tileHeight) {
             tileHeight={tileHeight}
             groutSpacing={groutSpacing}
             isLandscape={isLandscape}
+            selectedCorners={selectedCorners}
+            setSelectedCorners={setSelectedCorners}
+            showCornerSelector={showCornerSelector}
           />
         </View>
 
@@ -1255,20 +1837,60 @@ if (markedImage && tileWidth && tileHeight) {
             <Text style={{ color: '#fff', fontSize: 20, fontWeight: 'bold' }}>
               Visual Markup
             </Text>
-            <TouchableOpacity
-              onPress={() => setMarkedImage(null)}
-              style={{
-                padding: 8,
-                backgroundColor: 'rgba(255,255,255,0.2)',
-                borderRadius: 20,
-                width: 40,
-                height: 40,
-                justifyContent: 'center',
-                alignItems: 'center'
-              }}
-            >
-              <Text style={{ color: '#fff', fontSize: 24, fontWeight: 'bold' }}>✕</Text>
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              {/* Reset corners button */}
+              {showCornerSelector && (
+                <TouchableOpacity
+                  onPress={() => setSelectedCorners({
+                    tl: { x: 0, y: 0 },
+                    tr: { x: 1, y: 0 },
+                    bl: { x: 0, y: 1 },
+                    br: { x: 1, y: 1 }
+                  })}
+                  style={{
+                    padding: 8,
+                    backgroundColor: 'rgba(255,255,255,0.2)',
+                    borderRadius: 20,
+                    width: 40,
+                    height: 40,
+                    justifyContent: 'center',
+                    alignItems: 'center'
+                  }}
+                >
+                  <Text style={{ color: '#fff', fontSize: 18 }}>↺</Text>
+                </TouchableOpacity>
+              )}
+              {/* Corner adjustment toggle */}
+              <TouchableOpacity
+                onPress={() => setShowCornerSelector(!showCornerSelector)}
+                style={{
+                  padding: 8,
+                  backgroundColor: showCornerSelector ? '#3B82F6' : 'rgba(255,255,255,0.2)',
+                  borderRadius: 20,
+                  width: 40,
+                  height: 40,
+                  justifyContent: 'center',
+                  alignItems: 'center'
+                }}
+              >
+                <Text style={{ color: '#fff', fontSize: 18 }}>⛶</Text>
+              </TouchableOpacity>
+              {/* Close button */}
+              <TouchableOpacity
+                onPress={() => setMarkedImage(null)}
+                style={{
+                  padding: 8,
+                  backgroundColor: 'rgba(255,255,255,0.2)',
+                  borderRadius: 20,
+                  width: 40,
+                  height: 40,
+                  justifyContent: 'center',
+                  alignItems: 'center'
+                }}
+              >
+                <Text style={{ color: '#fff', fontSize: 24, fontWeight: 'bold' }}>✕</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           <MarkedWallImage
@@ -1280,6 +1902,9 @@ if (markedImage && tileWidth && tileHeight) {
             tileHeight={tileHeight}
             groutSpacing={groutSpacing}
             isLandscape={isLandscape}
+            selectedCorners={selectedCorners}
+            setSelectedCorners={setSelectedCorners}
+            showCornerSelector={showCornerSelector}
           />
 
           {/* Full legend */}
@@ -1307,6 +1932,173 @@ if (markedImage && tileWidth && tileHeight) {
   // Use a key to force ScrollView re-creation when capturedWallImage changes
   const scrollKey = `main-scroll-${capturedWallImage ? 'with-image' : 'no-image'}`;
 
+  // Instructions/Onboarding Screen
+  if (showInstructions) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#1E3A5F' }}>
+        <ScrollView style={{ flex: 1 }}>
+          <View style={{ padding: 24, paddingTop: 60 }}>
+            {/* Header */}
+            <View style={{ alignItems: 'center', marginBottom: 32 }}>
+              <Text style={{ fontSize: 36, marginBottom: 8 }}>🧱</Text>
+              <Text style={{ fontSize: 28, fontWeight: 'bold', color: '#fff', textAlign: 'center' }}>
+                Welcome to TileCalc Pro
+              </Text>
+              <Text style={{ fontSize: 16, color: '#93C5FD', marginTop: 8, textAlign: 'center' }}>
+                AI-Powered Tile Estimation Made Easy
+              </Text>
+            </View>
+
+            {/* Step by Step Guide */}
+            <View style={{ backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 16, padding: 20, marginBottom: 24 }}>
+              <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#fff', marginBottom: 16 }}>
+                📋 How to Use
+              </Text>
+
+              {/* Step 1 */}
+              <View style={{ flexDirection: 'row', marginBottom: 20 }}>
+                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold' }}>1</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
+                    Select a Reference Object
+                  </Text>
+                  <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
+                    Choose an object with known dimensions (door, credit card, outlet, etc.) that's visible in your photo. This helps the AI measure your wall accurately.
+                  </Text>
+                </View>
+              </View>
+
+              {/* Step 2 */}
+              <View style={{ flexDirection: 'row', marginBottom: 20 }}>
+                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold' }}>2</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
+                    Take a Photo of Your Wall
+                  </Text>
+                  <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
+                    Capture a clear photo showing the entire wall area you want to tile. Make sure your reference object is visible in the shot!
+                  </Text>
+                </View>
+              </View>
+
+              {/* Step 3 */}
+              <View style={{ flexDirection: 'row', marginBottom: 20 }}>
+                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold' }}>3</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
+                    Enter Your Tile Dimensions
+                  </Text>
+                  <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
+                    Input the width and height of your tiles in inches. You can also adjust grout spacing. The AI uses your wall measurements + your tile size to calculate everything.
+                  </Text>
+                </View>
+              </View>
+
+              {/* Step 4 */}
+              <View style={{ flexDirection: 'row', marginBottom: 20 }}>
+                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold' }}>4</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
+                    View Results & Visual Markup
+                  </Text>
+                  <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
+                    See exactly how many tiles you need, which ones require cuts, and a visual overlay showing tile placement on your actual wall photo.
+                  </Text>
+                </View>
+              </View>
+
+              {/* Step 5 */}
+              <View style={{ flexDirection: 'row' }}>
+                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold' }}>5</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
+                    Adjust Corners (Optional)
+                  </Text>
+                  <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
+                    In the Visual Markup view, tap the ⛶ button to drag the corner handles and adjust the tile grid perspective to match your wall angle.
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            {/* Tips Section */}
+            <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.2)', borderRadius: 16, padding: 20, marginBottom: 24, borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.3)' }}>
+              <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#93C5FD', marginBottom: 12 }}>
+                💡 Pro Tips
+              </Text>
+              <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 22, marginBottom: 8 }}>
+                • Use a credit card or dollar bill as reference for small areas
+              </Text>
+              <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 22, marginBottom: 8 }}>
+                • Use a standard door (36" × 80") for larger walls
+              </Text>
+              <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 22, marginBottom: 8 }}>
+                • Take photos straight-on for best accuracy
+              </Text>
+              <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 22 }}>
+                • Rotate your phone to landscape for a larger visual markup view
+              </Text>
+            </View>
+
+            {/* Legend */}
+            <View style={{ backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 16, padding: 20, marginBottom: 32 }}>
+              <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#fff', marginBottom: 12 }}>
+                🎨 Visual Markup Colors
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                <View style={{ width: 24, height: 24, backgroundColor: '#10B981', borderRadius: 4, marginRight: 12 }} />
+                <Text style={{ fontSize: 14, color: '#CBD5E1' }}>Green = Full tiles (no cuts needed)</Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                <View style={{ width: 24, height: 24, backgroundColor: '#EF4444', borderRadius: 4, marginRight: 12 }} />
+                <Text style={{ fontSize: 14, color: '#CBD5E1' }}>Red = Tiles that need cuts</Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <View style={{ width: 24, height: 24, backgroundColor: '#F59E0B', borderRadius: 4, marginRight: 12 }} />
+                <Text style={{ fontSize: 14, color: '#CBD5E1' }}>Yellow = Tiles blocked by obstacles</Text>
+              </View>
+            </View>
+
+            {/* Get Started Button */}
+            <TouchableOpacity
+              onPress={dismissInstructions}
+              style={{
+                backgroundColor: '#3B82F6',
+                paddingVertical: 16,
+                borderRadius: 12,
+                alignItems: 'center',
+                marginBottom: 16,
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 4 },
+                shadowOpacity: 0.3,
+                shadowRadius: 8,
+                elevation: 6
+              }}
+            >
+              <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>
+                {isFirstLaunch ? "Let's Get Started! 🚀" : "Back to App"}
+              </Text>
+            </TouchableOpacity>
+
+            <Text style={{ color: '#64748B', fontSize: 12, textAlign: 'center' }}>
+              You can access these instructions anytime by tapping the ❓ button
+            </Text>
+          </View>
+        </ScrollView>
+      </View>
+    );
+  }
+
   return (
     <View style={{ flex: 1, backgroundColor: '#FEF3E2' }}>
     <ScrollView key={scrollKey} style={{ flex: 1 }}>
@@ -1316,8 +2108,23 @@ if (markedImage && tileWidth && tileHeight) {
           <Text style={styles.title}>TileCalc Pro</Text>
           <Text style={styles.subtitle}>AI-Powered Tile Estimation</Text>
         </View>
-        <Image 
-          source={{ uri: 'https://a.espncdn.com/combiner/i?img=/i/headshots/nba/players/full/3908809.png' }} 
+        {/* Help Button */}
+        <TouchableOpacity
+          onPress={() => setShowInstructions(true)}
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: 18,
+            backgroundColor: 'rgba(255,255,255,0.3)',
+            justifyContent: 'center',
+            alignItems: 'center',
+            marginRight: 8
+          }}
+        >
+          <Text style={{ fontSize: 18 }}>❓</Text>
+        </TouchableOpacity>
+        <Image
+          source={{ uri: 'https://a.espncdn.com/combiner/i?img=/i/headshots/nba/players/full/3908809.png' }}
           style={styles.jarrettImage}
         />
       </View>
