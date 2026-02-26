@@ -639,12 +639,29 @@ const MarkedWallImage = ({
           
           {/* Mark obstacles */}
           {obstacles?.map((obstacle, index) => {
-            // Convert from wall inches (Y=0 at bottom) to SVG pixels (Y=0 at top)
-            // Use grid offset to match the tile grid position
-            const obsX = displayedImage.offsetX + gridOffsetX + (obstacle.position?.x || 0) * scaleX;
-            const obsY = displayedImage.offsetY + gridOffsetY + (wallH - (obstacle.position?.y || 0)) * scaleY;
-            const size = obstacle.diameter || obstacle.size?.width || 5;
-            const radius = (size / 2) * scaleX;
+            // Use positionPct (percentage 0-100) for accurate placement
+            // positionPct.x = % from left, positionPct.y = % from top
+            const hasPct = obstacle.positionPct != null;
+
+            // Map percentage directly onto the grid area
+            const obsX = hasPct
+              ? displayedImage.offsetX + gridOffsetX + (obstacle.positionPct.x / 100) * gridWidth
+              : displayedImage.offsetX + gridOffsetX + (obstacle.position?.x || 0) * scaleX;
+
+            const obsY = hasPct
+              ? displayedImage.offsetY + gridOffsetY + (obstacle.positionPct.y / 100) * gridHeight
+              : displayedImage.offsetY + gridOffsetY + (wallH - (obstacle.position?.y || 0)) * scaleY;
+
+            // Size: use sizePct if available, otherwise fall back to fixed pixels
+            const obsW = hasPct && obstacle.sizePct
+              ? (obstacle.sizePct.width / 100) * gridWidth
+              : Math.max((obstacle.size?.width || 3) * scaleX, 20);
+            const obsH = hasPct && obstacle.sizePct
+              ? (obstacle.sizePct.height / 100) * gridHeight
+              : Math.max((obstacle.size?.height || 5) * scaleY, 28);
+            const radius = hasPct && obstacle.diameterPct
+              ? (obstacle.diameterPct / 100) * gridWidth / 2
+              : Math.max((obstacle.diameter || 3) * scaleX / 2, 14);
 
             return (
               <React.Fragment key={index}>
@@ -655,26 +672,26 @@ const MarkedWallImage = ({
                     r={radius}
                     stroke="#F59E0B"
                     strokeWidth={3}
-                    fill="rgba(245, 158, 11, 0.2)"
+                    fill="rgba(245, 158, 11, 0.3)"
                   />
                 ) : (
                   <Rect
-                    x={obsX - (obstacle.size?.width || 3) * scaleX / 2}
-                    y={obsY - (obstacle.size?.height || 5) * scaleY / 2}
-                    width={(obstacle.size?.width || 3) * scaleX}
-                    height={(obstacle.size?.height || 5) * scaleY}
+                    x={obsX - obsW / 2}
+                    y={obsY - obsH / 2}
+                    width={obsW}
+                    height={obsH}
                     stroke="#F59E0B"
                     strokeWidth={3}
-                    fill="rgba(245, 158, 11, 0.2)"
+                    fill="rgba(245, 158, 11, 0.3)"
                   />
                 )}
 
                 {/* Label */}
                 <SvgText
                   x={obsX}
-                  y={obsY - radius - 5}
+                  y={obsY - (obstacle.type === 'pipe' ? radius : obsH / 2) - 5}
                   fill="#F59E0B"
-                  fontSize="12"
+                  fontSize="11"
                   fontWeight="bold"
                   textAnchor="middle"
                 >
@@ -756,6 +773,9 @@ export default function Index() {
     bl: { x: 0.05, y: 0.95 },
     br: { x: 0.95, y: 0.95 }
   });
+
+  // Area selector image container dimensions
+  const [areaSelectorLayout, setAreaSelectorLayout] = useState({ width: 0, height: 0 });
 
   // Onboarding/Instructions screen state - show on first launch of each session
   const [showInstructions, setShowInstructions] = useState(true);
@@ -891,12 +911,14 @@ The wall dimensions you return should be for this selected region only.
     let referenceInstructions = '';
     if (referenceObj && referenceObj !== 'none' && referenceObjects[referenceObj]) {
       const ref = referenceObjects[referenceObj];
-      referenceInstructions = 'CRITICAL: The user placed a ' + ref.name + ' in the image. ';
-      referenceInstructions += 'It measures exactly ' + ref.width + ' inches wide x ' + ref.height + ' inches tall. ';
-      referenceInstructions += 'You MUST locate it and use it to calculate the wall size. ';
-      referenceInstructions += 'Compare the reference object size to the wall area in the photo. ';
-      referenceInstructions += 'If this is a zoomed-in photo of a small area, give SMALL dimensions. ';
-      referenceInstructions += 'Do NOT guess typical wall sizes - only measure what you see.';
+      referenceInstructions = 'CRITICAL MEASUREMENT TASK - follow these exact steps:\n';
+      referenceInstructions += 'Step 1: Find the ' + ref.name + ' in the image. It is exactly ' + ref.width + ' inches wide and ' + ref.height + ' inches tall.\n';
+      referenceInstructions += 'Step 2: Visually estimate what fraction of the TOTAL IMAGE WIDTH the ' + ref.name + ' occupies. For example if the image is 1000px wide and the ' + ref.name + ' is 80px wide, that is 8%.\n';
+      referenceInstructions += 'Step 3: Visually estimate what fraction of the TOTAL IMAGE WIDTH the wall area occupies.\n';
+      referenceInstructions += 'Step 4: Calculate wall_width = (wall fraction / ref fraction) x ' + ref.width + ' inches.\n';
+      referenceInstructions += 'Step 5: Repeat for height using ' + ref.height + ' inches.\n';
+      referenceInstructions += 'IMPORTANT: Be careful not to underestimate the size of the ' + ref.name + ' in the image. If it looks large in the photo, the wall is small. If it looks tiny, the wall is large.\n';
+      referenceInstructions += 'Do NOT default to typical room dimensions. Only report what you calculate from the reference object.';
     } else {
       referenceInstructions = 'No reference object specified. Look for doors (80x36 inches), outlets (4.5x2.75 inches), or light switches to estimate scale. Only measure what you see.';
     }
@@ -937,11 +959,12 @@ Also look for these obstacles that will require special tile cuts:
 - Vents or registers
 - Any protrusions or recesses
 
-For each obstacle, estimate:
-- Type of obstacle
-- Approximate location (top/middle/bottom, left/center/right)
-- Approximate position in inches from bottom-left corner
-- Size/diameter if visible
+For each obstacle, you MUST:
+- Identify its type
+- Estimate its center position as a PERCENTAGE of the wall width (0% = left edge, 100% = right edge) and PERCENTAGE of wall height (0% = top edge, 100% = bottom edge)
+- Estimate its size as a percentage of wall dimensions
+
+IMPORTANT: Use percentages for positions, NOT inches. Look carefully at where the obstacle actually appears in the image relative to the wall edges.
 
 Respond ONLY with JSON (no markdown):
 {
@@ -955,15 +978,15 @@ Respond ONLY with JSON (no markdown):
     {
       "type": "outlet",
       "location": "center-right",
-      "position": {"x": 90, "y": 48},
-      "size": {"width": 3, "height": 5},
+      "positionPct": {"x": 75, "y": 60},
+      "sizePct": {"width": 4, "height": 6},
       "cutGuidance": "Will need rectangular cutout in 1-2 tiles"
     },
     {
       "type": "pipe",
       "location": "bottom-left",
-      "position": {"x": 12, "y": 6},
-      "diameter": 2,
+      "positionPct": {"x": 20, "y": 85},
+      "diameterPct": 3,
       "cutGuidance": "Will need circular notch in 1 tile"
     }
   ],
@@ -1037,9 +1060,21 @@ Respond ONLY with JSON (no markdown):
 
     const confidenceEmoji = aiResult.confidence === 'high' ? '✅' : aiResult.confidence === 'medium' ? '⚠️' : '❓';
 
-    Alert.alert('AI Analysis Complete',
-      `Wall: ${aiResult.width}" × ${aiResult.height}"\n${confidenceEmoji} Confidence: ${aiResult.confidence}${referenceText}\n\n${aiResult.reasoning}${obstacleText}`,
-      [{ text: 'OK' }],
+    Alert.alert(
+      'AI Analysis Complete',
+      `Wall: ${aiResult.width}" × ${aiResult.height}"\n${confidenceEmoji} Confidence: ${aiResult.confidence}${referenceText}\n\n${aiResult.reasoning}${obstacleText}\n\nDo the dimensions look correct? If not, you can edit them manually in the Wall Size fields below.`,
+      [
+        {
+          text: 'Edit Dimensions',
+          onPress: () => {
+            // Dimensions already set, user can edit in the input fields
+          }
+        },
+        {
+          text: 'Looks Good ✓',
+          style: 'default'
+        }
+      ],
       { cancelable: true }
     );
     
@@ -1189,11 +1224,13 @@ Respond ONLY with JSON (no markdown):
         setShowCamera(false);
 
         if (cameraMode === 'wall') {
-          // For wall photos, analyze directly
-          console.log('🤖 Starting AI analysis...');
+          // Show area selector first so user can outline the wall
+          console.log('📐 Opening area selector...');
+          setPendingImageUri(photo.uri);
           setCapturedWallImage(photo.uri);
-          await analyzeWallImage(photo.uri, selectedReferenceObject);
-          console.log('✅ Analysis complete');
+          setAreaCorners({ tl: { x: 0.05, y: 0.05 }, tr: { x: 0.95, y: 0.05 }, bl: { x: 0.05, y: 0.95 }, br: { x: 0.95, y: 0.95 } });
+          setAreaSelectorLayout({ width: 0, height: 0 });
+          setShowAreaSelector(true);
         } else {
           // For tile photos, analyze immediately
           console.log('🤖 Starting AI analysis');
@@ -1224,11 +1261,13 @@ Respond ONLY with JSON (no markdown):
       const imageUri = result.assets[0].uri;
 
       if (mode === 'wall') {
-        // For wall photos, analyze directly
-        console.log('🤖 Starting AI analysis...');
+        // Show area selector first so user can outline the wall
+        console.log('📐 Opening area selector...');
+        setPendingImageUri(imageUri);
         setCapturedWallImage(imageUri);
-        await analyzeWallImage(imageUri, selectedReferenceObject);
-        console.log('✅ Analysis complete');
+        setAreaCorners({ tl: { x: 0.05, y: 0.05 }, tr: { x: 0.95, y: 0.05 }, bl: { x: 0.05, y: 0.95 }, br: { x: 0.95, y: 0.95 } });
+        setAreaSelectorLayout({ width: 0, height: 0 });
+        setShowAreaSelector(true);
       } else {
         setCapturedTileImage(imageUri);
         await analyzeTileImage(imageUri);
@@ -1391,11 +1430,11 @@ Respond ONLY with JSON (no markdown):
   };
 
   // Area Selector Screen - shown after taking/picking a wall photo
-  // Simplified version without draggable corners to avoid crashes
   if (showAreaSelector && pendingImageUri) {
     console.log('📐 Rendering Area Selector');
     return (
       <View style={{ flex: 1, backgroundColor: '#000' }}>
+
         {/* Header */}
         <View style={{
           flexDirection: 'row',
@@ -1403,43 +1442,97 @@ Respond ONLY with JSON (no markdown):
           alignItems: 'center',
           paddingHorizontal: 16,
           paddingTop: 50,
-          paddingBottom: 16,
-          backgroundColor: 'rgba(0,0,0,0.8)'
+          paddingBottom: 12,
+          backgroundColor: 'rgba(0,0,0,0.85)'
         }}>
-          <TouchableOpacity onPress={cancelAreaSelection}>
-            <Text style={{ color: '#fff', fontSize: 16 }}>✕ Cancel</Text>
+          <TouchableOpacity onPress={cancelAreaSelection}
+            style={{ padding: 8 }}>
+            <Text style={{ color: '#EF4444', fontSize: 16, fontWeight: '600' }}>✕ Retake</Text>
           </TouchableOpacity>
           <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>
-            Confirm Photo
+            Select Wall Area
           </Text>
-          <View style={{ width: 60 }} />
+          <TouchableOpacity
+            onPress={() => setAreaCorners({
+              tl: { x: 0.05, y: 0.05 },
+              tr: { x: 0.95, y: 0.05 },
+              bl: { x: 0.05, y: 0.95 },
+              br: { x: 0.95, y: 0.95 }
+            })}
+            style={{ padding: 8 }}>
+            <Text style={{ color: '#3B82F6', fontSize: 16, fontWeight: '600' }}>↺ Reset</Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Instructions */}
-        <View style={{
-          backgroundColor: 'rgba(59, 130, 246, 0.9)',
-          paddingVertical: 12,
-          paddingHorizontal: 16
-        }}>
-          <Text style={{ color: '#fff', fontSize: 14, textAlign: 'center' }}>
-            📸 Review your photo, then tap "Analyze" to measure the wall
+        {/* Instruction banner */}
+        <View style={{ backgroundColor: '#1D4ED8', paddingVertical: 10, paddingHorizontal: 16 }}>
+          <Text style={{ color: '#fff', fontSize: 13, textAlign: 'center' }}>
+            👆 Drag the 4 corner handles to outline just the wall area you want to tile
           </Text>
         </View>
 
-        {/* Image preview */}
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 16 }}>
+        {/* Image + corner selector */}
+        <View
+          style={{ flex: 1 }}
+          onLayout={(e) => {
+            const { width, height } = e.nativeEvent.layout;
+            setAreaSelectorLayout({ width, height });
+          }}
+        >
           <Image
             source={{ uri: pendingImageUri }}
-            style={{ width: '100%', height: '100%', borderRadius: 8 }}
+            style={{ width: '100%', height: '100%' }}
             resizeMode="contain"
           />
+
+          {/* Blue outline of selected area */}
+          {areaSelectorLayout.width > 0 && (
+            <Svg
+              style={{ position: 'absolute', top: 0, left: 0 }}
+              width={areaSelectorLayout.width}
+              height={areaSelectorLayout.height}
+              pointerEvents="none"
+            >
+              {/* Dim overlay outside selection */}
+              <Rect x="0" y="0"
+                width={areaSelectorLayout.width}
+                height={areaSelectorLayout.height}
+                fill="rgba(0,0,0,0.45)"
+              />
+              {/* Selection outline */}
+              <Polygon
+                points={
+                  (areaCorners.tl.x * areaSelectorLayout.width) + ',' + (areaCorners.tl.y * areaSelectorLayout.height) + ' ' +
+                  (areaCorners.tr.x * areaSelectorLayout.width) + ',' + (areaCorners.tr.y * areaSelectorLayout.height) + ' ' +
+                  (areaCorners.br.x * areaSelectorLayout.width) + ',' + (areaCorners.br.y * areaSelectorLayout.height) + ' ' +
+                  (areaCorners.bl.x * areaSelectorLayout.width) + ',' + (areaCorners.bl.y * areaSelectorLayout.height)
+                }
+                fill="rgba(255,255,255,0.08)"
+                stroke="#3B82F6"
+                strokeWidth="2.5"
+              />
+            </Svg>
+          )}
+
+          {/* Draggable corner handles */}
+          {areaSelectorLayout.width > 0 && (
+            <CornerSelector
+              corners={areaCorners}
+              setCorners={setAreaCorners}
+              offsetX={0}
+              offsetY={0}
+              displayedWidth={areaSelectorLayout.width}
+              displayedHeight={areaSelectorLayout.height}
+            />
+          )}
         </View>
 
-        {/* Bottom buttons */}
+        {/* Bottom action buttons */}
         <View style={{
           padding: 16,
-          paddingBottom: 32,
-          backgroundColor: 'rgba(0,0,0,0.8)'
+          paddingBottom: 36,
+          backgroundColor: 'rgba(0,0,0,0.85)',
+          gap: 10
         }}>
           <TouchableOpacity
             onPress={proceedWithAnalysis}
@@ -1447,30 +1540,17 @@ Respond ONLY with JSON (no markdown):
               backgroundColor: '#10B981',
               paddingVertical: 16,
               borderRadius: 12,
-              alignItems: 'center',
-              marginBottom: 12
+              alignItems: 'center'
             }}
           >
             <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>
-              ✓ Analyze This Photo
+              ✓ Analyze Selected Area
             </Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            onPress={cancelAreaSelection}
-            style={{
-              backgroundColor: 'transparent',
-              paddingVertical: 12,
-              borderRadius: 12,
-              alignItems: 'center',
-              borderWidth: 1,
-              borderColor: '#6B7280'
-            }}
-          >
-            <Text style={{ color: '#9CA3AF', fontSize: 16 }}>
-              ↩ Retake Photo
-            </Text>
-          </TouchableOpacity>
+          <Text style={{ color: '#6B7280', fontSize: 12, textAlign: 'center' }}>
+            The AI will measure only the area you outlined and calculate tile requirements
+          </Text>
         </View>
       </View>
     );
@@ -1727,14 +1807,14 @@ if (markedImage && tileWidth && tileHeight) {
           onPress={() => setMarkedImage(null)}
           style={{
             position: 'absolute',
-            top: 8,
-            right: 8,
+            top: 50,
+            right: 16,
             zIndex: 10,
             padding: 8,
             backgroundColor: 'rgba(0,0,0,0.6)',
             borderRadius: 20,
-            width: 36,
-            height: 36,
+            width: 44,
+            height: 44,
             justifyContent: 'center',
             alignItems: 'center'
           }}
@@ -1747,19 +1827,19 @@ if (markedImage && tileWidth && tileHeight) {
           onPress={() => setShowCornerSelector(!showCornerSelector)}
           style={{
             position: 'absolute',
-            top: 10,
-            right: 60,
+            top: 50,
+            right: 76,
             zIndex: 10,
             padding: 8,
             backgroundColor: showCornerSelector ? '#3B82F6' : 'rgba(0,0,0,0.6)',
             borderRadius: 20,
-            width: 36,
-            height: 36,
+            width: 44,
+            height: 44,
             justifyContent: 'center',
             alignItems: 'center'
           }}
         >
-          <Text style={{ color: '#fff', fontSize: 16 }}>⛶</Text>
+          <Text style={{ color: '#fff', fontSize: 18 }}>⛶</Text>
         </TouchableOpacity>
 
         {/* Reset corners button */}
@@ -1773,19 +1853,19 @@ if (markedImage && tileWidth && tileHeight) {
             })}
             style={{
               position: 'absolute',
-              top: 10,
-              right: 110,
+              top: 50,
+              right: 136,
               zIndex: 10,
               padding: 8,
               backgroundColor: 'rgba(0,0,0,0.6)',
               borderRadius: 20,
-              width: 36,
-              height: 36,
+              width: 44,
+              height: 44,
               justifyContent: 'center',
               alignItems: 'center'
             }}
           >
-            <Text style={{ color: '#fff', fontSize: 16 }}>↺</Text>
+            <Text style={{ color: '#fff', fontSize: 18 }}>↺</Text>
           </TouchableOpacity>
         )}
 
@@ -1831,8 +1911,9 @@ if (markedImage && tileWidth && tileHeight) {
           <View style={{
             flexDirection: 'row',
             justifyContent: 'space-between',
+            alignItems: 'center',
             marginBottom: 16,
-            paddingTop: 20
+            paddingTop: 50
           }}>
             <Text style={{ color: '#fff', fontSize: 20, fontWeight: 'bold' }}>
               Visual Markup
@@ -1952,7 +2033,7 @@ if (markedImage && tileWidth && tileHeight) {
             {/* Step by Step Guide */}
             <View style={{ backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 16, padding: 20, marginBottom: 24 }}>
               <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#fff', marginBottom: 16 }}>
-                📋 How to Use
+                📋 How to Use (Follow This Order!)
               </Text>
 
               {/* Step 1 */}
@@ -1962,10 +2043,10 @@ if (markedImage && tileWidth && tileHeight) {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
-                    Select a Reference Object
+                    Enter Your Tile Dimensions First
                   </Text>
                   <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
-                    Choose an object with known dimensions (door, credit card, outlet, etc.) that's visible in your photo. This helps the AI measure your wall accurately.
+                    Before taking a photo, enter your tile width and height (in inches) and adjust grout spacing. This ensures accurate tile count calculations.
                   </Text>
                 </View>
               </View>
@@ -1977,10 +2058,10 @@ if (markedImage && tileWidth && tileHeight) {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
-                    Take a Photo of Your Wall
+                    Select a Reference Object
                   </Text>
                   <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
-                    Capture a clear photo showing the entire wall area you want to tile. Make sure your reference object is visible in the shot!
+                    Pick an object with known dimensions (credit card, door, outlet, etc.) and place it against the wall before taking the photo. This is how the AI calculates accurate wall size.
                   </Text>
                 </View>
               </View>
@@ -1992,40 +2073,55 @@ if (markedImage && tileWidth && tileHeight) {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
-                    Enter Your Tile Dimensions
+                    Take a Photo of the Wall
                   </Text>
                   <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
-                    Input the width and height of your tiles in inches. You can also adjust grout spacing. The AI uses your wall measurements + your tile size to calculate everything.
+                    Capture a clear, straight-on photo of the wall. Make sure the reference object is clearly visible. It is okay if the photo includes some floor or ceiling.
                   </Text>
                 </View>
               </View>
 
               {/* Step 4 */}
               <View style={{ flexDirection: 'row', marginBottom: 20 }}>
-                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#10B981', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
                   <Text style={{ color: '#fff', fontWeight: 'bold' }}>4</Text>
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
-                    View Results & Visual Markup
+                    Select the Wall Area (Corner Tool)
                   </Text>
                   <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
-                    See exactly how many tiles you need, which ones require cuts, and a visual overlay showing tile placement on your actual wall photo.
+                    After taking the photo, drag the 4 corner handles to outline ONLY the wall section you want to tile. Exclude the floor, ceiling, or areas you do not want tiled. Then tap "Analyze Selected Area".
                   </Text>
                 </View>
               </View>
 
               {/* Step 5 */}
-              <View style={{ flexDirection: 'row' }}>
+              <View style={{ flexDirection: 'row', marginBottom: 20 }}>
                 <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
                   <Text style={{ color: '#fff', fontWeight: 'bold' }}>5</Text>
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
-                    Adjust Corners (Optional)
+                    Review AI Results
                   </Text>
                   <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
-                    In the Visual Markup view, tap the ⛶ button to drag the corner handles and adjust the tile grid perspective to match your wall angle.
+                    The AI measures your selected wall area and calculates exactly how many tiles you need, how many need cuts, and estimated cost.
+                  </Text>
+                </View>
+              </View>
+
+              {/* Step 6 */}
+              <View style={{ flexDirection: 'row' }}>
+                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold' }}>6</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
+                    View Visual Markup
+                  </Text>
+                  <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
+                    See the tile grid overlaid on your wall photo showing exactly which tiles are full cuts, partial cuts, and which are blocked by obstacles.
                   </Text>
                 </View>
               </View>
@@ -2037,16 +2133,19 @@ if (markedImage && tileWidth && tileHeight) {
                 💡 Pro Tips
               </Text>
               <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 22, marginBottom: 8 }}>
-                • Use a credit card or dollar bill as reference for small areas
+                • Always enter tile dimensions BEFORE taking a photo
               </Text>
               <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 22, marginBottom: 8 }}>
-                • Use a standard door (36" × 80") for larger walls
+                • Hold your reference object flat against the wall surface
               </Text>
               <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 22, marginBottom: 8 }}>
-                • Take photos straight-on for best accuracy
+                • Use a door (36x80 inches) for large walls, credit card for small areas
+              </Text>
+              <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 22, marginBottom: 8 }}>
+                • Use the corner tool to exclude floor and ceiling from your selection
               </Text>
               <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 22 }}>
-                • Rotate your phone to landscape for a larger visual markup view
+                • Rotate phone to landscape for a bigger visual markup view
               </Text>
             </View>
 
