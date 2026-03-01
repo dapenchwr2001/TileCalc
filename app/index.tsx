@@ -777,6 +777,22 @@ export default function Index() {
   // Area selector image container dimensions
   const [areaSelectorLayout, setAreaSelectorLayout] = useState({ width: 0, height: 0 });
 
+  // Reference object marker state - user taps 2 corners of the reference object
+  const [showRefMarker, setShowRefMarker] = useState(false);
+  const [refTap1, setRefTap1] = useState<{x: number, y: number} | null>(null);
+  const [refTap2, setRefTap2] = useState<{x: number, y: number} | null>(null);
+  const [refMarkerLayout, setRefMarkerLayout] = useState({ width: 0, height: 0 });
+  const [calculatedWallWidth, setCalculatedWallWidth] = useState<number | null>(null);
+  const [calculatedWallHeight, setCalculatedWallHeight] = useState<number | null>(null);
+
+  // Ref marker screen zoom/pan state (for precise corner tapping)
+  const [refViewZoom, setRefViewZoom] = useState(1);
+  const [refViewPan, setRefViewPan] = useState({ x: 0, y: 0 });
+  const refViewZoomRef = useRef(1);
+  const refViewPanRef = useRef({ x: 0, y: 0 });
+  const refPanStartRef = useRef({ x: 0, y: 0 });
+  const refPinchRef = useRef({ dist: 0, zoomStart: 1 });
+
   // Onboarding/Instructions screen state - show on first launch of each session
   const [showInstructions, setShowInstructions] = useState(true);
   const [isFirstLaunch, setIsFirstLaunch] = useState(true);
@@ -872,8 +888,14 @@ export default function Index() {
     setIsCapturingAR(false);
   };
 
-  const analyzeWallImage = async (imageUri, referenceObj = null, areaSelection = null) => {
+  const analyzeWallImage = async (imageUri, referenceObj = null, areaSelection = null, preCalcWidth = null, preCalcHeight = null) => {
   setIsAnalyzing(true);
+
+  // If dimensions are already measured, set them immediately so UI is updated
+  if (preCalcWidth && preCalcHeight) {
+    setWallWidth(preCalcWidth.toString());
+    setWallHeight(preCalcHeight.toString());
+  }
 
   try {
     const compressedUri = await compressImage(imageUri);
@@ -907,9 +929,15 @@ The wall dimensions you return should be for this selected region only.
 `;
     }
 
-    // Build reference object instructions
+    // Build measurement instructions
     let referenceInstructions = '';
-    if (referenceObj && referenceObj !== 'none' && referenceObjects[referenceObj]) {
+    if (preCalcWidth && preCalcHeight) {
+      // Dimensions already measured by user tapping the reference object - just find obstacles
+      referenceInstructions = 'CRITICAL: The wall dimensions have been PRECISELY MEASURED by the user using a physical reference object.\n';
+      referenceInstructions += 'Use EXACTLY these values: width=' + preCalcWidth + ' inches, height=' + preCalcHeight + ' inches.\n';
+      referenceInstructions += 'Do NOT attempt to recalculate or estimate dimensions. Your ONLY task is to identify obstacles.\n';
+      referenceInstructions += 'Set confidence to "high" since dimensions were manually measured.';
+    } else if (referenceObj && referenceObj !== 'none' && referenceObjects[referenceObj]) {
       const ref = referenceObjects[referenceObj];
       referenceInstructions = 'CRITICAL MEASUREMENT TASK - follow these exact steps:\n';
       referenceInstructions += 'Step 1: Find the ' + ref.name + ' in the image. It is exactly ' + ref.width + ' inches wide and ' + ref.height + ' inches tall.\n';
@@ -947,52 +975,44 @@ The wall dimensions you return should be for this selected region only.
               },
               {
                 type: "text",
-                text: `Analyze this wall for tile installation. Provide ACCURATE dimensions using the reference object, and identify any obstacles.
-${areaInstructions}${referenceInstructions}
-
-Also look for these obstacles that will require special tile cuts:
-- Electrical outlets or switches
-- Pipes (water, gas, drain)
-- Windows or window frames
-- Door frames
-- Fixtures (towel bars, toilet paper holders)
-- Vents or registers
-- Any protrusions or recesses
-
-For each obstacle, you MUST:
-- Identify its type
-- Estimate its center position as a PERCENTAGE of the wall width (0% = left edge, 100% = right edge) and PERCENTAGE of wall height (0% = top edge, 100% = bottom edge)
-- Estimate its size as a percentage of wall dimensions
-
-IMPORTANT: Use percentages for positions, NOT inches. Look carefully at where the obstacle actually appears in the image relative to the wall edges.
-
-Respond ONLY with JSON (no markdown):
-{
-  "width": 120,
-  "height": 96,
-  "confidence": "high",
-  "referenceObjectFound": true,
-  "referenceObjectUsed": "door",
-  "reasoning": "Measured wall relative to standard door (36x80 inches) visible in image",
-  "obstacles": [
-    {
-      "type": "outlet",
-      "location": "center-right",
-      "positionPct": {"x": 75, "y": 60},
-      "sizePct": {"width": 4, "height": 6},
-      "cutGuidance": "Will need rectangular cutout in 1-2 tiles"
-    },
-    {
-      "type": "pipe",
-      "location": "bottom-left",
-      "positionPct": {"x": 20, "y": 85},
-      "diameterPct": 3,
-      "cutGuidance": "Will need circular notch in 1 tile"
-    }
-  ],
-  "totalObstacles": 2,
-  "cutTilesEstimate": 3
-}`
+                text: 'Analyze this wall for tile installation. ' +
+                  (preCalcWidth && preCalcHeight
+                    ? 'Dimensions are pre-measured. Your job is ONLY to identify obstacles.'
+                    : 'Provide ACCURATE dimensions using the reference object, and identify any obstacles.') +
+                  '\n' + areaInstructions + referenceInstructions +
+                  '\n\nAlso look for these obstacles that will require special tile cuts:\n' +
+                  '- Electrical outlets or switches\n' +
+                  '- Pipes (water, gas, drain)\n' +
+                  '- Windows or window frames\n' +
+                  '- Door frames\n' +
+                  '- Fixtures (towel bars, toilet paper holders)\n' +
+                  '- Vents or registers\n' +
+                  '- Any protrusions or recesses\n\n' +
+                  'For each obstacle, you MUST:\n' +
+                  '- Identify its type\n' +
+                  '- Estimate its center position as a PERCENTAGE of the wall width (0% = left edge, 100% = right edge) and PERCENTAGE of wall height (0% = top edge, 100% = bottom edge)\n' +
+                  '- Estimate its size as a percentage of wall dimensions\n\n' +
+                  'IMPORTANT: Use percentages for positions, NOT inches. Look carefully at where the obstacle actually appears in the image relative to the wall edges.\n\n' +
+                  'Respond ONLY with JSON (no markdown):\n' +
+                  '{\n' +
+                  '  "width": ' + (preCalcWidth || 120) + ',\n' +
+                  '  "height": ' + (preCalcHeight || 96) + ',\n' +
+                  '  "confidence": "high",\n' +
+                  '  "referenceObjectFound": ' + (preCalcWidth ? 'true' : 'false') + ',\n' +
+                  '  "referenceObjectUsed": "tap-measured",\n' +
+                  '  "reasoning": "' + (preCalcWidth ? 'Wall dimensions pre-measured using physical reference object taps.' : 'Estimated from image.') + '",\n' +
+                  '  "obstacles": [\n' +
+                  '    {\n' +
+                  '      "type": "outlet",\n' +
+                  '      "location": "center-right",\n' +
+                  '      "positionPct": {"x": 75, "y": 60},\n' +
+                  '      "sizePct": {"width": 4, "height": 6},\n' +
+                  '      "cutGuidance": "Will need rectangular cutout in 1-2 tiles"\n' +
+                  '    }\n' +
+                  '  ],\n' +
+                  '  "totalObstacles": 1,\n' +
+                  '  "cutTilesEstimate": 2\n' +
+                  '}'
               }
             ]
           }
@@ -1024,11 +1044,23 @@ Respond ONLY with JSON (no markdown):
     console.log('🔍 Extracted JSON:', cleanText.substring(0, 200));
     const aiResult = JSON.parse(cleanText);
 
-    setWallWidth(aiResult.width.toString());
-    setWallHeight(aiResult.height.toString());
+    // Use pre-calculated dimensions if available (more accurate than AI estimate)
+    if (preCalcWidth && preCalcHeight) {
+      setWallWidth(preCalcWidth.toString());
+      setWallHeight(preCalcHeight.toString());
+    } else {
+      setWallWidth(aiResult.width.toString());
+      setWallHeight(aiResult.height.toString());
+    }
 
     // Save detected reference object info
-    if (aiResult.referenceObjectFound) {
+    if (preCalcWidth && preCalcHeight) {
+      setDetectedReferenceObject({
+        found: true,
+        type: 'tap-measured',
+        confidence: 'high'
+      });
+    } else if (aiResult.referenceObjectFound) {
       setDetectedReferenceObject({
         found: true,
         type: aiResult.referenceObjectUsed,
@@ -1060,9 +1092,13 @@ Respond ONLY with JSON (no markdown):
 
     const confidenceEmoji = aiResult.confidence === 'high' ? '✅' : aiResult.confidence === 'medium' ? '⚠️' : '❓';
 
+    const displayWidth = preCalcWidth || aiResult.width;
+    const displayHeight = preCalcHeight || aiResult.height;
+    const tapMeasuredNote = preCalcWidth && preCalcHeight ? '\n📐 Tap-measured (high precision)' : referenceText;
+
     Alert.alert(
-      'AI Analysis Complete',
-      `Wall: ${aiResult.width}" × ${aiResult.height}"\n${confidenceEmoji} Confidence: ${aiResult.confidence}${referenceText}\n\n${aiResult.reasoning}${obstacleText}\n\nDo the dimensions look correct? If not, you can edit them manually in the Wall Size fields below.`,
+      'Analysis Complete',
+      'Wall: ' + displayWidth + '" \u00d7 ' + displayHeight + '"' + tapMeasuredNote + '\n\n' + (preCalcWidth ? 'Dimensions measured precisely from your reference object taps.' : aiResult.reasoning) + obstacleText + '\n\nYou can edit dimensions manually in the Wall Size fields if needed.',
       [
         {
           text: 'Edit Dimensions',
@@ -1361,6 +1397,57 @@ Respond ONLY with JSON (no markdown):
     return displayZoom.toFixed(1);
   };
 
+  // PanResponder for ref marker screen: pinch-to-zoom + drag-to-pan
+  // Single-finger taps pass through to the TouchableOpacity overlay for corner marking
+  const refImagePanResponder = useMemo(() => PanResponder.create({
+    // Claim 2-finger gestures immediately (pinch)
+    onStartShouldSetPanResponder: (evt) => evt.nativeEvent.touches.length === 2,
+    // Claim single-finger drags only after meaningful movement
+    onMoveShouldSetPanResponder: (evt, gs) => {
+      if (evt.nativeEvent.touches.length === 2) return true;
+      return Math.abs(gs.dx) > 5 || Math.abs(gs.dy) > 5;
+    },
+    onPanResponderGrant: (evt) => {
+      // Save starting pan for incremental drag calculation
+      refPanStartRef.current = { ...refViewPanRef.current };
+      if (evt.nativeEvent.touches.length === 2) {
+        const t = evt.nativeEvent.touches;
+        const d = Math.sqrt(Math.pow(t[0].pageX - t[1].pageX, 2) + Math.pow(t[0].pageY - t[1].pageY, 2));
+        refPinchRef.current = { dist: d, zoomStart: refViewZoomRef.current };
+      }
+    },
+    onPanResponderMove: (evt, gs) => {
+      if (evt.nativeEvent.touches.length === 2) {
+        const t = evt.nativeEvent.touches;
+        const d = Math.sqrt(Math.pow(t[0].pageX - t[1].pageX, 2) + Math.pow(t[0].pageY - t[1].pageY, 2));
+        if (refPinchRef.current.dist > 0) {
+          const newZ = Math.max(1, Math.min(6, refPinchRef.current.zoomStart * d / refPinchRef.current.dist));
+          refViewZoomRef.current = newZ;
+          setRefViewZoom(newZ);
+        }
+      } else if (refViewZoomRef.current > 1) {
+        // Pan only when zoomed in
+        const newPan = {
+          x: refPanStartRef.current.x + gs.dx,
+          y: refPanStartRef.current.y + gs.dy,
+        };
+        refViewPanRef.current = newPan;
+        setRefViewPan({ ...newPan });
+      }
+    },
+    onPanResponderRelease: () => {
+      refPinchRef.current.dist = 0;
+    },
+  }), []);
+
+  // Reset ref marker zoom/pan (called when entering the ref marker screen)
+  const resetRefZoom = () => {
+    setRefViewZoom(1);
+    setRefViewPan({ x: 0, y: 0 });
+    refViewZoomRef.current = 1;
+    refViewPanRef.current = { x: 0, y: 0 };
+  };
+
   // Check if we have enough data for AR overlay
   const canShowAROverlay = wallWidth && wallHeight && tileWidth && tileHeight && cameraMode === 'wall';
 
@@ -1398,28 +1485,104 @@ Respond ONLY with JSON (no markdown):
   console.log('🔄 Render state:', {
     showCamera,
     showAreaSelector,
+    showRefMarker,
+    showInstructions,
     markedImage: !!markedImage,
     capturedWallImage: !!capturedWallImage,
+    pendingImageUri: !!pendingImageUri,
     isLandscape,
     tileWidth,
     tileHeight
   });
 
-  // Function to proceed with AI analysis after area selection
+  // Function to proceed after area selection
+  // If a real reference object is selected → go to ref marker screen for precise measurement
+  // Otherwise → go straight to AI analysis
   const proceedWithAnalysis = async () => {
     if (!pendingImageUri) return;
-
-    console.log('🤖 Starting AI analysis with selected area...');
     setShowAreaSelector(false);
 
-    // Pass the area corners to the AI analysis so it knows what area to focus on
-    await analyzeWallImage(pendingImageUri, selectedReferenceObject, areaCorners);
+    if (selectedReferenceObject && selectedReferenceObject !== 'none') {
+      // Route to ref marker screen so user can tap reference object corners
+      console.log('📐 Opening ref marker screen...');
+      setRefTap1(null);
+      setRefTap2(null);
+      setRefMarkerLayout({ width: 0, height: 0 });
+      // Reset zoom/pan for fresh view
+      setRefViewZoom(1);
+      setRefViewPan({ x: 0, y: 0 });
+      refViewZoomRef.current = 1;
+      refViewPanRef.current = { x: 0, y: 0 };
+      setShowRefMarker(true);
+    } else {
+      // No reference object - go straight to AI analysis
+      console.log('🤖 Starting AI analysis (no reference object)...');
+      await analyzeWallImage(pendingImageUri, selectedReferenceObject, areaCorners);
+      setSelectedCorners(areaCorners);
+      setPendingImageUri(null);
+      console.log('✅ Analysis complete');
+    }
+  };
 
-    // Also set these corners for the visual markup view
+  // Calculate wall dimensions from ref marker taps, then analyze
+  const calculateAndAnalyze = async () => {
+    if (!refTap1 || !refTap2 || !pendingImageUri) return;
+    if (!selectedReferenceObject || selectedReferenceObject === 'none') return;
+
+    const ref = referenceObjects[selectedReferenceObject];
+    const containerW = refMarkerLayout.width;
+    const containerH = refMarkerLayout.height;
+
+    // Calculate pixel distance between the two taps (diagonal of ref object)
+    const dx = refTap2.x - refTap1.x;
+    const dy = refTap2.y - refTap1.y;
+    const tapPixelDiagonal = Math.sqrt(dx * dx + dy * dy);
+
+    // Diagonal of the reference object in inches
+    const refDiagonal = Math.sqrt(ref.width * ref.width + ref.height * ref.height);
+
+    if (tapPixelDiagonal < 10) {
+      Alert.alert('Taps Too Close', 'The two taps are very close together. Please tap opposite corners of the ' + ref.name + '.');
+      return;
+    }
+
+    // Pixels per inch in screen space
+    const pxPerInch = tapPixelDiagonal / refDiagonal;
+
+    // Calculate wall area dimensions from areaCorners (0-1 normalized → screen pixels)
+    const tl = { x: areaCorners.tl.x * containerW, y: areaCorners.tl.y * containerH };
+    const tr = { x: areaCorners.tr.x * containerW, y: areaCorners.tr.y * containerH };
+    const bl = { x: areaCorners.bl.x * containerW, y: areaCorners.bl.y * containerH };
+    const br = { x: areaCorners.br.x * containerW, y: areaCorners.br.y * containerH };
+
+    const topEdgePx = Math.sqrt(Math.pow(tr.x - tl.x, 2) + Math.pow(tr.y - tl.y, 2));
+    const botEdgePx = Math.sqrt(Math.pow(br.x - bl.x, 2) + Math.pow(br.y - bl.y, 2));
+    const leftEdgePx = Math.sqrt(Math.pow(bl.x - tl.x, 2) + Math.pow(bl.y - tl.y, 2));
+    const rightEdgePx = Math.sqrt(Math.pow(br.x - tr.x, 2) + Math.pow(br.y - tr.y, 2));
+
+    const avgWidthPx = (topEdgePx + botEdgePx) / 2;
+    const avgHeightPx = (leftEdgePx + rightEdgePx) / 2;
+
+    const calcW = Math.round(avgWidthPx / pxPerInch);
+    const calcH = Math.round(avgHeightPx / pxPerInch);
+
+    console.log('📐 Tap measurement:', { calcW, calcH, pxPerInch: pxPerInch.toFixed(2), tapPixelDiagonal: tapPixelDiagonal.toFixed(1), refDiagonal: refDiagonal.toFixed(2) });
+
+    if (calcW <= 0 || calcH <= 0) {
+      Alert.alert('Calculation Error', 'Could not calculate wall dimensions. Please retake the photo and try again.');
+      return;
+    }
+
+    setCalculatedWallWidth(calcW);
+    setCalculatedWallHeight(calcH);
+
+    // Hide ref marker screen and run AI (only for obstacle detection, dimensions are pre-calculated)
+    setShowRefMarker(false);
+
+    await analyzeWallImage(pendingImageUri, null, areaCorners, calcW, calcH);
     setSelectedCorners(areaCorners);
-
     setPendingImageUri(null);
-    console.log('✅ Analysis complete');
+    console.log('✅ Tap-measured analysis complete');
   };
 
   // Cancel area selection and go back
@@ -1544,13 +1707,191 @@ Respond ONLY with JSON (no markdown):
             }}
           >
             <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>
-              ✓ Analyze Selected Area
+              {selectedReferenceObject && selectedReferenceObject !== 'none'
+                ? '✓ Next: Mark Reference Object'
+                : '✓ Analyze Selected Area'}
             </Text>
           </TouchableOpacity>
 
           <Text style={{ color: '#6B7280', fontSize: 12, textAlign: 'center' }}>
-            The AI will measure only the area you outlined and calculate tile requirements
+            {selectedReferenceObject && selectedReferenceObject !== 'none'
+              ? 'Next you will tap 2 corners of your reference object for precise measurement'
+              : 'The AI will measure only the area you outlined and calculate tile requirements'}
           </Text>
+        </View>
+      </View>
+    );
+  }
+
+  // Ref Marker Screen - pinch-to-zoom + drag-to-pan for precise corner tapping
+  if (showRefMarker && pendingImageUri) {
+    console.log('📐 Rendering Ref Marker Screen');
+    const refObj = selectedReferenceObject ? referenceObjects[selectedReferenceObject] : null;
+    const tapStep = !refTap1 ? 1 : !refTap2 ? 2 : 3;
+    const refDiag = refObj ? Math.sqrt(refObj.width * refObj.width + refObj.height * refObj.height) : 0;
+    const CW = refMarkerLayout.width;
+    const CH = refMarkerLayout.height;
+
+    // Convert image-space coordinates → display-space for the SVG overlay dots
+    // Image coords are in the unzoomed container space; display coords account for zoom+pan
+    const toDisplay = (pt: {x: number, y: number}) => ({
+      x: (pt.x - CW / 2) * refViewZoom + CW / 2 + refViewPan.x,
+      y: (pt.y - CH / 2) * refViewZoom + CH / 2 + refViewPan.y,
+    });
+
+    // Tap handler: convert display (screen) coords → image (unzoomed) coords
+    const handleRefTap = (e: any) => {
+      const { locationX, locationY } = e.nativeEvent;
+      const IX = (locationX - refViewPan.x - CW / 2) / refViewZoom + CW / 2;
+      const IY = (locationY - refViewPan.y - CH / 2) / refViewZoom + CH / 2;
+      if (!refTap1) {
+        setRefTap1({ x: IX, y: IY });
+      } else if (!refTap2) {
+        setRefTap2({ x: IX, y: IY });
+      }
+    };
+
+    const dot1 = refTap1 ? toDisplay(refTap1) : null;
+    const dot2 = refTap2 ? toDisplay(refTap2) : null;
+
+    return (
+      <View style={{ flex: 1, backgroundColor: '#000' }}>
+
+        {/* Header */}
+        <View style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          paddingHorizontal: 16,
+          paddingTop: 50,
+          paddingBottom: 12,
+          backgroundColor: 'rgba(0,0,0,0.85)'
+        }}>
+          <TouchableOpacity
+            onPress={() => { setShowRefMarker(false); setShowAreaSelector(true); }}
+            style={{ padding: 8 }}>
+            <Text style={{ color: '#EF4444', fontSize: 16, fontWeight: '600' }}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={{ color: '#fff', fontSize: 17, fontWeight: 'bold' }}>
+            Mark Reference Object
+          </Text>
+          <TouchableOpacity
+            onPress={() => { setRefTap1(null); setRefTap2(null); }}
+            style={{ padding: 8 }}>
+            <Text style={{ color: '#3B82F6', fontSize: 16, fontWeight: '600' }}>↺ Redo</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Instruction banner */}
+        <View style={{ backgroundColor: tapStep === 3 ? '#065F46' : '#1D4ED8', paddingVertical: 8, paddingHorizontal: 16 }}>
+          <Text style={{ color: '#fff', fontSize: 13, textAlign: 'center', fontWeight: '600' }}>
+            {tapStep === 1 && refObj ? 'Step 1: Tap the TOP-LEFT corner of the ' + refObj.name : ''}
+            {tapStep === 2 && refObj ? 'Step 2: Tap the BOTTOM-RIGHT corner of the ' + refObj.name : ''}
+            {tapStep === 3 ? '✅ Both corners marked! Tap Calculate & Analyze below.' : ''}
+          </Text>
+          <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 11, textAlign: 'center', marginTop: 2 }}>
+            Pinch to zoom in • Drag to pan • Tap to mark corner
+          </Text>
+        </View>
+
+        {/* Zoomable image area */}
+        <View
+          style={{ flex: 1, overflow: 'hidden' }}
+          onLayout={(e) => {
+            const { width, height } = e.nativeEvent.layout;
+            setRefMarkerLayout({ width, height });
+          }}
+          {...refImagePanResponder.panHandlers}
+        >
+          {/* The image with zoom+pan transform */}
+          <Image
+            source={{ uri: pendingImageUri }}
+            style={{
+              width: '100%',
+              height: '100%',
+              transform: [
+                { scale: refViewZoom },
+                { translateX: refViewPan.x },
+                { translateY: refViewPan.y },
+              ],
+            }}
+            resizeMode="contain"
+          />
+
+          {/* SVG overlay — dots shown in display (transformed) coordinates */}
+          {CW > 0 && (
+            <Svg
+              style={{ position: 'absolute', top: 0, left: 0 }}
+              width={CW}
+              height={CH}
+              pointerEvents="none"
+            >
+              {dot1 && (
+                <>
+                  <Circle cx={dot1.x} cy={dot1.y} r={14} stroke="#10B981" strokeWidth={3} fill="rgba(16,185,129,0.35)" />
+                  <SvgText x={dot1.x} y={dot1.y + 5} fill="#10B981" fontSize="13" fontWeight="bold" textAnchor="middle">1</SvgText>
+                </>
+              )}
+              {dot2 && (
+                <>
+                  <Circle cx={dot2.x} cy={dot2.y} r={14} stroke="#10B981" strokeWidth={3} fill="rgba(16,185,129,0.35)" />
+                  <SvgText x={dot2.x} y={dot2.y + 5} fill="#10B981" fontSize="13" fontWeight="bold" textAnchor="middle">2</SvgText>
+                </>
+              )}
+              {dot1 && dot2 && (
+                <Line x1={dot1.x} y1={dot1.y} x2={dot2.x} y2={dot2.y} stroke="#10B981" strokeWidth={2} strokeDasharray="5,3" />
+              )}
+            </Svg>
+          )}
+
+          {/* Transparent tap overlay — tap registers as corner mark, drag is handled by PanResponder above */}
+          <TouchableOpacity
+            activeOpacity={1}
+            style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
+            onPress={handleRefTap}
+          />
+
+          {/* Zoom indicator + reset button (top-right corner) */}
+          {refViewZoom > 1.05 && (
+            <View style={{ position: 'absolute', top: 10, right: 10, flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+              <View style={{ backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 }}>
+                <Text style={{ color: '#fff', fontSize: 13, fontWeight: 'bold' }}>{refViewZoom.toFixed(1)}x</Text>
+              </View>
+              <TouchableOpacity
+                onPress={resetRefZoom}
+                style={{ backgroundColor: 'rgba(59,130,246,0.8)', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 }}>
+                <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>Reset</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+
+        {/* Bottom section */}
+        <View style={{ padding: 16, paddingBottom: 36, backgroundColor: 'rgba(0,0,0,0.85)', gap: 8 }}>
+          {refObj && (
+            <Text style={{ color: '#6B7280', fontSize: 11, textAlign: 'center' }}>
+              {refObj.icon} {refObj.name}: {refObj.width}" × {refObj.height}"  •  Zoom in for precision
+            </Text>
+          )}
+          <TouchableOpacity
+            onPress={calculateAndAnalyze}
+            disabled={!refTap1 || !refTap2 || isAnalyzing}
+            style={{
+              backgroundColor: (refTap1 && refTap2 && !isAnalyzing) ? '#10B981' : '#374151',
+              paddingVertical: 16,
+              borderRadius: 12,
+              alignItems: 'center',
+              opacity: (!refTap1 || !refTap2) ? 0.5 : 1
+            }}
+          >
+            {isAnalyzing ? (
+              <ActivityIndicator color="#fff" size="large" />
+            ) : (
+              <Text style={{ color: '#fff', fontSize: 17, fontWeight: 'bold' }}>
+                {refTap1 && refTap2 ? '📐 Calculate & Analyze Wall' : 'Tap both corners first'}
+              </Text>
+            )}
+          </TouchableOpacity>
         </View>
       </View>
     );
@@ -2091,30 +2432,45 @@ if (markedImage && tileWidth && tileHeight) {
                     Select the Wall Area (Corner Tool)
                   </Text>
                   <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
-                    After taking the photo, drag the 4 corner handles to outline ONLY the wall section you want to tile. Exclude the floor, ceiling, or areas you do not want tiled. Then tap "Analyze Selected Area".
+                    Drag the 4 corner handles to outline ONLY the wall section you want to tile. Exclude the floor, ceiling, or areas you do not want tiled. Then tap "Analyze Selected Area".
                   </Text>
                 </View>
               </View>
 
               {/* Step 5 */}
               <View style={{ flexDirection: 'row', marginBottom: 20 }}>
-                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#10B981', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
                   <Text style={{ color: '#fff', fontWeight: 'bold' }}>5</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
+                    Tap the Reference Object Corners 📐
+                  </Text>
+                  <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
+                    Tap the TOP-LEFT corner, then the BOTTOM-RIGHT corner of your reference object in the photo. The app uses this to calculate the exact pixel-to-inch scale — no AI guessing!
+                  </Text>
+                </View>
+              </View>
+
+              {/* Step 6 */}
+              <View style={{ flexDirection: 'row', marginBottom: 20 }}>
+                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold' }}>6</Text>
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
                     Review AI Results
                   </Text>
                   <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 20 }}>
-                    The AI measures your selected wall area and calculates exactly how many tiles you need, how many need cuts, and estimated cost.
+                    The AI uses your precise wall dimensions and identifies any obstacles (outlets, pipes, etc.) that require special tile cuts.
                   </Text>
                 </View>
               </View>
 
-              {/* Step 6 */}
+              {/* Step 7 */}
               <View style={{ flexDirection: 'row' }}>
                 <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
-                  <Text style={{ color: '#fff', fontWeight: 'bold' }}>6</Text>
+                  <Text style={{ color: '#fff', fontWeight: 'bold' }}>7</Text>
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 16, fontWeight: '600', color: '#fff', marginBottom: 4 }}>
